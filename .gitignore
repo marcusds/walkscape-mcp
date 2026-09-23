@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Third-party source copies (not licensed for redistribution); created locally by `walkscape-drift --accept`
+reference/planner/optimiser.worker.js
+reference/planner/snippets.json
+reference/wiki/

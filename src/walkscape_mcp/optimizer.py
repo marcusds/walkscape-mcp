@@ -1,0 +1,350 @@
+"""Loadout search: greedy construction + hill climbing + set-bonus seeding."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+from .engine import (
+    GEAR_DEPENDENT_REQS, SLOT_ORDER, Context, Evaluation, Loadout, check_all, evaluate, gear_source,
+    slot_type, static_sources, steps_per_item,
+)
+from .gamedata import QUALITIES, GameData
+from .player import OwnedItem, Player
+
+OBJECTIVES = {
+    "item": "minimize expected steps per drop of `target` item (activity drop tables + 'chance to find' gear)",
+    "fine_item": "minimize expected steps per fine version of `target` item",
+    "xp": "maximize XP per step for `target` skill (default: activity's main skill)",
+    "total_xp": "maximize total XP per step across all skills the activity rewards",
+    "reward_rolls": "minimize steps per loot roll (general 'more drops' objective)",
+    "actions": "minimize steps per action (ignores double rewards)",
+    "fine": "minimize steps per fine-material roll",
+    "chests": "minimize steps per chest (any chest table)",
+    "gems": "minimize steps per gem",
+    "collectibles": "minimize steps per collectible drop",
+}
+
+
+@dataclass
+class Objective:
+    kind: str
+    target: str | None = None
+
+    def value(self, ev: Evaluation) -> float:
+        """Lower is better."""
+        m = ev.metrics
+        match self.kind:
+            case "item":
+                return steps_per_item(ev, self.target)
+            case "fine_item":
+                return steps_per_item(ev, self.target, fine=True)
+            case "xp":
+                v = m["xp_per_step"].get(self.target or m["main_skill"], 0)
+                return 1 / v if v > 0 else math.inf
+            case "total_xp":
+                v = sum(m["xp_per_step"].values())
+                return 1 / v if v > 0 else math.inf
+            case "reward_rolls":
+                return m["steps_per_reward_roll"]
+            case "actions":
+                return m["steps_per_action"]
+            case "fine":
+                return m["steps_per_fine_roll"]
+            case "chests" | "gems" | "collectibles":
+                kind = {"chests": "chestTable", "gems": "gem", "collectibles": "collectible"}[self.kind]
+                per_roll = sum(d["per_roll"] for d in ev.drops if d["table"] == kind)
+                return m["steps_per_reward_roll"] / per_roll if per_roll > 0 else math.inf
+        raise ValueError(f"Unknown objective {self.kind!r}; choose from {list(OBJECTIVES)}")
+
+    def describe(self, v: float) -> str:
+        if math.isinf(v):
+            return "not obtainable with this loadout"
+        match self.kind:
+            case "xp" | "total_xp":
+                return f"{1 / v:.4f} XP/step"
+            case _:
+                return f"{v:,.1f} steps per unit"
+
+
+@dataclass
+class Candidate:
+    oi: OwnedItem
+    slot_type: str
+    keywords: frozenset[str]
+    banned: frozenset[str]
+
+
+@dataclass
+class SearchSpace:
+    ctx: Context
+    slots: list[str]
+    candidates: dict[str, list[Candidate]]  # slot type -> candidates
+    pets: list[tuple[str, int] | None]
+    consumables: list[tuple[str, bool] | None]
+    locked: dict[str, object] = field(default_factory=dict)  # slot -> OwnedItem | None | pet/consumable tuple
+    pruned_count: int = 0
+
+
+def _banned_for(gd: GameData, keywords) -> frozenset[str]:
+    out = set()
+    for k in keywords:
+        out.update((gd.keywords.get(k) or {}).get("bannedKeywords") or [])
+    return frozenset(out)
+
+
+def _useful_keywords(ctx: Context, items: list[OwnedItem]) -> set[str]:
+    """Keywords mentioned by the activity's requirements or by gear-dependent attribute requirements."""
+    kws = set()
+    reqs = list(ctx.activity.get("requirements") or [])
+    for oi in items:
+        for a in gear_source(ctx.gd, oi).attrs:
+            reqs.extend(r for r in a.get("requirements") or [] if r["type"] in GEAR_DEPENDENT_REQS)
+    for r in reqs:
+        q = r.get("requirement") or {}
+        if r["type"] == "keywordEquipped" or r["type"] == "keywordWithLevelEquipped":
+            kws.add(q.get("keyword"))
+        elif r["type"] == "distinctKeywordItemsEquipped":
+            kws.update(q.get("keywords") or [])
+    return kws
+
+
+def build_space(
+    ctx: Context,
+    pool: list[OwnedItem],
+    pets: list[tuple[str, int] | None],
+    consumables: list[tuple[str, bool] | None],
+    locked: dict[str, object] | None = None,
+    exclude: set[str] | None = None,
+) -> SearchSpace:
+    gd = ctx.gd
+    exclude = exclude or set()
+    slots = [s for s in SLOT_ORDER if not s.startswith("tool") or int(s[4:]) < ctx.tool_slots]
+
+    # keep only the best quality of each item id
+    best: dict[str, OwnedItem] = {}
+    for oi in pool:
+        if oi.id in exclude or not gd.is_gear(oi.id):
+            continue
+        if oi.id not in best or QUALITIES.index(oi.quality) > QUALITIES.index(best[oi.id].quality):
+            best[oi.id] = oi
+    equipable = [oi for oi in best.values() if check_all(gd.items[oi.id].get("requirements"), ctx, None)]
+
+    useful_kw = _useful_keywords(ctx, equipable)
+    cands: dict[str, list[Candidate]] = {}
+    pruned = 0
+    for oi in equipable:
+        item = gd.items[oi.id]
+        kws = frozenset(item.get("keywords") or [])
+        could_help = any(a.get("stats") and check_all(a.get("requirements"), ctx, None) for a in gear_source(gd, oi).attrs)
+        if not could_help and not (kws & useful_kw):
+            pruned += 1
+            continue
+        st = item["gearType"]
+        cands.setdefault(st, []).append(Candidate(oi, st, kws, _banned_for(gd, kws)))
+    return SearchSpace(ctx, slots, cands, pets, consumables, dict(locked or {}), pruned)
+
+
+def _conflicts(space: SearchSpace, lo: Loadout, slot: str, cand: Candidate) -> bool:
+    st = slot_type(slot)
+    for other_slot, oi in lo.slots.items():
+        if other_slot == slot or not oi or slot_type(other_slot) != st:
+            continue
+        if oi.id == cand.oi.id:
+            return True
+        other_kws = frozenset(space.ctx.gd.items[oi.id].get("keywords") or [])
+        if cand.keywords & _banned_for(space.ctx.gd, other_kws) or other_kws & cand.banned:
+            return True
+    return False
+
+
+class Searcher:
+    def __init__(self, space: SearchSpace, objective: Objective, secondary: Objective | None = None):
+        self.space = space
+        self.obj = objective
+        self.secondary = secondary or Objective("reward_rolls")
+        self.statics = static_sources(space.ctx)
+        self.evals = 0
+        self._cache: dict[tuple, tuple] = {}
+
+    def key(self, lo: Loadout) -> tuple:
+        return (tuple(sorted((s, i.key()) for s, i in lo.slots.items() if i)), lo.pet, lo.consumable)
+
+    def score(self, lo: Loadout) -> tuple:
+        k = self.key(lo)
+        if k in self._cache:
+            return self._cache[k]
+        self.evals += 1
+        ev = evaluate(self.space.ctx, lo, self.statics, detail=False)
+        penalty = len(ev.unmet_activity_requirements) + len(ev.invalid_items)
+        s = (penalty, self.obj.value(ev), self.secondary.value(ev))
+        self._cache[k] = s
+        return s
+
+    def moves(self, lo: Loadout, slot: str):
+        if slot in self.space.locked:
+            return
+        if slot == "pet":
+            for p in self.space.pets:
+                if p != lo.pet:
+                    yield "pet", p
+            return
+        if slot == "consumable":
+            for c in self.space.consumables:
+                if c != lo.consumable:
+                    yield "consumable", c
+            return
+        cur = lo.slots.get(slot)
+        if cur is not None:
+            yield slot, None
+        for c in self.space.candidates.get(slot_type(slot), []):
+            if cur and c.oi == cur:
+                continue
+            if not _conflicts(self.space, lo, slot, c):
+                yield slot, c.oi
+
+    @staticmethod
+    def apply(lo: Loadout, slot: str, val) -> Loadout:
+        new = lo.copy()
+        if slot == "pet":
+            new.pet = val
+        elif slot == "consumable":
+            new.consumable = val
+        else:
+            new.slots[slot] = val
+        return new
+
+    def all_slots(self) -> list[str]:
+        extra = []
+        if len(self.space.pets) > 1 and "pet" not in self.space.locked:
+            extra.append("pet")
+        if len(self.space.consumables) > 1 and "consumable" not in self.space.locked:
+            extra.append("consumable")
+        return extra + self.space.slots
+
+    def greedy(self, lo: Loadout) -> Loadout:
+        # fill most-constrained slots first, as the official planner does
+        order = sorted(self.all_slots(), key=lambda s: len(self.space.candidates.get(slot_type(s), [])))
+        for slot in order:
+            best, best_s = lo, self.score(lo)
+            for s, v in self.moves(lo, slot):
+                cand = self.apply(lo, s, v)
+                sc = self.score(cand)
+                if sc < best_s:
+                    best, best_s = cand, sc
+            lo = best
+        return lo
+
+    def climb(self, lo: Loadout, max_rounds: int = 30) -> Loadout:
+        cur_s = self.score(lo)
+        for _ in range(max_rounds):
+            best, best_s = None, cur_s
+            for slot in self.all_slots():
+                for s, v in self.moves(lo, slot):
+                    cand = self.apply(lo, s, v)
+                    sc = self.score(cand)
+                    if sc < best_s:
+                        best, best_s = cand, sc
+            if best is None:
+                break
+            lo, cur_s = best, best_s
+        return self.trim(lo)
+
+    def trim(self, lo: Loadout) -> Loadout:
+        """Drop items that contribute nothing (keeps the result readable)."""
+        base = self.score(lo)
+        for slot in list(lo.slots):
+            if slot in self.space.locked or not lo.slots[slot]:
+                continue
+            cand = self.apply(lo, slot, None)
+            if self.score(cand) <= base:
+                lo = cand
+        return lo
+
+    def set_seeds(self, lo: Loadout) -> list[Loadout]:
+        """For each keyword set bonus, force in the pieces we own and let hill climbing sort out the rest."""
+        gd = self.space.ctx.gd
+        set_kws: dict[str, int] = {}
+        for cands in self.space.candidates.values():
+            for c in cands:
+                for a in gear_source(gd, c.oi).attrs:
+                    for r in a.get("requirements") or []:
+                        if r["type"] == "distinctKeywordItemsEquipped":
+                            for k in r["requirement"].get("keywords") or []:
+                                set_kws[k] = max(set_kws.get(k, 0), r["requirement"].get("quantity", 1))
+        seeds = []
+        for kw in set_kws:
+            seed = lo.copy()
+            placed = 0
+            for slot in self.space.slots:
+                if slot in self.space.locked:
+                    continue
+                cur = seed.slots.get(slot)
+                if cur and kw in (gd.items[cur.id].get("keywords") or []):
+                    placed += 1
+                    continue
+                options = [c for c in self.space.candidates.get(slot_type(slot), [])
+                           if kw in c.keywords and not _conflicts(self.space, seed, slot, c)
+                           and c.oi not in seed.slots.values()]
+                if options:
+                    best = min(options, key=lambda c: self.score(self.apply(seed, slot, c.oi)))
+                    seed = self.apply(seed, slot, best.oi)
+                    placed += 1
+            if placed >= 2:
+                seeds.append(seed)
+        return seeds
+
+    def run(self, start: Loadout) -> Loadout:
+        for slot, val in self.space.locked.items():
+            start = self.apply(start, slot, val)
+        results = [self.climb(self.greedy(start.copy()))]
+        results.append(self.climb(start.copy()))
+        best = min(results, key=self.score)
+        for seed in self.set_seeds(best):
+            results.append(self.climb(seed))
+        return min(results, key=self.score)
+
+
+def optimize(
+    ctx: Context,
+    objective: Objective,
+    pool: list[OwnedItem],
+    pets: list[tuple[str, int] | None],
+    consumables: list[tuple[str, bool] | None],
+    start: Loadout | None = None,
+    locked: dict[str, object] | None = None,
+    exclude: set[str] | None = None,
+    secondary: Objective | None = None,
+) -> tuple[Loadout, Searcher]:
+    space = build_space(ctx, pool, pets, consumables, locked, exclude)
+    searcher = Searcher(space, objective, secondary)
+    start = start or Loadout(pet=pets[0] if len(pets) == 1 else None,
+                             consumable=consumables[0] if len(consumables) == 1 else None)
+    # the starting loadout may include items not in the pruned pool or tool slots we don't have
+    start = Loadout({s: i for s, i in start.slots.items() if s in space.slots}, start.pet, start.consumable)
+    return searcher.run(start), searcher
+
+
+def all_gear_pool(gd: GameData, max_quality: str = "ethereal") -> list[OwnedItem]:
+    cap = QUALITIES.index(max_quality)
+    out = []
+    for i, item in gd.items.items():
+        if not item.get("gearType"):
+            continue
+        qs = gd.item_qualities(i)
+        q = qs[min(len(qs) - 1, cap)] if len(qs) > 1 else qs[0]
+        out.append(OwnedItem(i, q))
+    return out
+
+
+def player_loadout(p: Player) -> Loadout:
+    slots = {}
+    for s, oi in p.equipped.items():
+        if s.startswith("ring_"):
+            slots[f"ring{int(s[5:]) - 1}"] = oi
+        elif s.startswith("tool_"):
+            slots[f"tool{int(s[5:]) - 1}"] = oi
+        else:
+            slots[s] = oi
+    pet = next(((x["species"], x["level"]) for x in p.pets if x.get("equipped")), None)
+    return Loadout(slots, pet)

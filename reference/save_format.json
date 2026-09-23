@@ -1,0 +1,46 @@
+{
+ "top_level": [
+  "achievement_points",
+  "available_eggs",
+  "available_pets",
+  "bank",
+  "chests",
+  "coins",
+  "collectibles",
+  "consumables",
+  "currencies",
+  "game_version",
+  "gear",
+  "inventory",
+  "lore",
+  "name",
+  "pets",
+  "reputation",
+  "skills",
+  "steps"
+ ],
+ "gear_slots": [
+  "back",
+  "cape",
+  "chest",
+  "feet",
+  "hands",
+  "head",
+  "legs",
+  "neck",
+  "ring_1",
+  "ring_2",
+  "tool_1",
+  "tool_2",
+  "tool_3",
+  "tool_4",
+  "tool_5"
+ ],
+ "pet_fields": [
+  "level",
+  "name",
+  "species",
+  "stage",
+  "xp"
+ ]
+}
