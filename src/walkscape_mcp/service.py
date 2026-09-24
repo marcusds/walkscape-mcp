@@ -199,13 +199,26 @@ class Service:
                              notes: list[str] | None = None, forget: list[str] | None = None) -> dict:
         info = self._info()
         met = info["history"]
+        skipped = []  # one unusable entry shouldn't discard the rest of the call
+
+        def parse(entry, pick):
+            try:
+                return self._parse_history(entry, pick)
+            except KeyError as e:
+                skipped.append(e.args[0] if e.args else str(e))
+                return None, None
+
         for entry in completed or []:
-            key, v = self._parse_history(entry, max)
+            key, v = parse(entry, max)
+            if key is None:
+                continue
             met[key] = max(met.get(key, 0), v)
             if self._not_met.get(key, math.inf) <= v:
                 del self._not_met[key]
         for entry in not_yet or []:
-            key, v = self._parse_history(entry, min)
+            key, v = parse(entry, min)
+            if key is None:
+                continue
             self._not_met[key] = min(self._not_met.get(key, math.inf), v)
             if met.get(key, -1) >= v:
                 del met[key]
@@ -218,7 +231,10 @@ class Service:
                 if x.lower() in self._history_label(k, met[k]).lower():
                     del met[k]
         player_info_file().write_text(json.dumps(info, indent=1) + "\n")
-        return self._describe_info(info)
+        out = self._describe_info(info)
+        if skipped:
+            out["skipped"] = skipped
+        return out
 
     def _describe_info(self, info: dict) -> dict:
         out = {"reached": [self._history_label(k, v) for k, v in info["history"].items()], "notes": info["notes"]}

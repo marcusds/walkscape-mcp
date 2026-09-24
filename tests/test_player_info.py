@@ -34,6 +34,9 @@ def test_explicit_threshold_and_corrections(svc):
     assert out["reached"] == []
 
 
-def test_unknown_history_rejected(svc):
-    with pytest.raises(KeyError):
-        svc.remember_player_info(completed=["Mine gold ore"])
+def test_unusable_history_skipped_without_losing_the_rest(svc):
+    out = svc.remember_player_info(completed=["Mine gold ore", "Classic skiing 50", "Not a real activity"],
+                                   notes=["Unlocked achievement: Human Fish"])
+    assert out["reached"] == ["Classic skiing completed 50+ times"]
+    assert out["notes"] == ["Unlocked achievement: Human Fish"]
+    assert len(out["skipped"]) == 2 and "Mine gold ore" in out["skipped"][0]
