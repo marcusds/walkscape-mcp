@@ -622,6 +622,7 @@ class Service:
             out["gear_set_export"] = gearset.encode(gd, lo)
         except Exception as e:
             out["gear_set_export"] = f"(export failed: {e})"
+        out["planner_link"] = gearset.encode_link(gd, lo, aid)
         out["notes"] = notes + [
             f"Searched {sum(len(v) for v in searcher.space.candidates.values())} candidate items "
             f"({searcher.space.pruned_count} irrelevant ones skipped), {searcher.evals} loadouts evaluated.",

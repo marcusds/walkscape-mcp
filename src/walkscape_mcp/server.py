@@ -25,8 +25,9 @@ Workflow:
    they've done an activity, travel steps, achievements, quests, unlocks), call remember_player_info so it persists.
    If results note assumed action history, ask the user whether they've reached each one and record the answer.
 
-Present results as a slot-by-slot table, the key numbers vs current gear, and the gear_set_export string
-(importable at gear.walkscape.app). Mention notes/assumptions briefly.
+Present results as a slot-by-slot table, the key numbers vs current gear, the planner_link (opens the loadout
+in gear.walkscape.app, handy on a phone; it drops item quality and pet level) and the gear_set_export string
+(full detail, importable at gear.walkscape.app). Mention notes/assumptions briefly.
 """
 
 mcp = MCPServer("walkscape", instructions=INSTRUCTIONS)

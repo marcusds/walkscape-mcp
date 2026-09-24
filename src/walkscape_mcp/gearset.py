@@ -112,3 +112,55 @@ def encode(gd: GameData, lo: Loadout) -> str:
     if generic:
         out["generic_slots"] = generic
     return base64.b64encode(gzip.compress(json.dumps(out, separators=(",", ":")).encode())).decode()
+
+
+# ---------- planner links: https://gear.walkscape.app/?q=... ----------
+# The planner packs one 9-bit index per field into the url_mapping lists (index 0 = empty), in this order;
+# a fine consumable sets bit 8 of its index. Items are stored without quality: crafted gear opens at the
+# planner's default quality, and a pet without its level.
+PLANNER_URL = "https://gear.walkscape.app/"
+LINK_ORDER = [("activity", "activity"), ("recipe", "recipe"), ("cape", "cape"), ("back", "back"), ("neck", "neck"),
+              ("hands", "hands"), ("head", "head"), ("chest", "chest"), ("legs", "legs"), ("feet", "feet"),
+              ("primary", "primary"), ("secondary", "secondary"), ("ring0", "ring"), ("ring1", "ring"),
+              *[(f"tool{i}", "tool") for i in range(6)], ("consumable", "consumable"), ("pet", "pet")]
+LINK_BITS, LINK_FINE = 9, 256
+
+
+def encode_link(gd: GameData, lo: Loadout, activity_id: str | None = None) -> str:
+    mapping = gd.snap.get("url_mapping") or {}
+    index = {cat: {v: i for i, v in enumerate(vals) if v} for cat, vals in mapping.items()}
+    is_recipe = activity_id in gd.recipes if activity_id else False
+    values = []
+    for field, cat in LINK_ORDER:
+        if field in ("activity", "recipe"):
+            key = activity_id if activity_id and (field == "recipe") == is_recipe else None
+        elif field == "consumable":
+            key = lo.consumable[0] if lo.consumable else None
+        elif field == "pet":
+            key = lo.pet[0] if lo.pet else None
+        else:
+            oi = lo.slots.get(field)
+            key = oi.id if oi else None
+        v = index.get(cat, {}).get(key, 0) if key else 0
+        if field == "consumable" and v and lo.consumable[1]:
+            v |= LINK_FINE
+        values.append(v)
+    bits = "".join(f"{v:0{LINK_BITS}b}" for v in values)
+    raw = bytes(int(bits[i:i + 8].ljust(8, "0"), 2) for i in range(0, len(bits), 8))
+    from urllib.parse import quote
+    return f"{PLANNER_URL}?q={quote(base64.b64encode(raw).decode(), safe='')}"
+
+
+def decode_link(gd: GameData, q: str) -> dict[str, str | None]:
+    """Inverse of encode_link's q value (for tests and pasted links): field -> id."""
+    mapping = gd.snap.get("url_mapping") or {}
+    bits = "".join(f"{b:08b}" for b in base64.b64decode(q))
+    out: dict[str, str | None] = {}
+    for i, (field, cat) in enumerate(LINK_ORDER):
+        v = int(bits[i * LINK_BITS:(i + 1) * LINK_BITS], 2)
+        if field == "consumable" and v & LINK_FINE:
+            v &= ~LINK_FINE
+            out["consumable_fine"] = "yes"
+        vals = mapping.get(cat) or []
+        out[field] = vals[v] if 0 < v < len(vals) else None
+    return out

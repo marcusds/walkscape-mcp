@@ -20,3 +20,18 @@ def test_roundtrip(gd):
     lo = Loadout({"tool0": OwnedItem("farganite_pickaxe", "epic"), "neck": OwnedItem("miners_beard", "rare")}, ("camel", 1))
     back, notes = gearset.decode(gd, gearset.encode(gd, lo))
     assert back.slots == lo.slots and back.pet == lo.pet and not notes
+
+
+def test_planner_link_round_trip(gd):
+    from urllib.parse import unquote
+
+    lo = Loadout({"head": OwnedItem("warm_beanie", "rare"), "ring1": OwnedItem("old_gold_ring", "rare"),
+                  "tool0": OwnedItem("sharp_machete", "rare")}, ("pixie", 3), ("beer", True))
+    link = gearset.encode_link(gd, lo, "cliff_foraging")
+    assert link.startswith("https://gear.walkscape.app/?q=")
+    d = gearset.decode_link(gd, unquote(link.split("q=")[1]))
+    assert (d["activity"], d["recipe"], d["head"], d["ring1"], d["tool0"], d["pet"]) == \
+        ("cliff_foraging", None, "warm_beanie", "old_gold_ring", "sharp_machete", "pixie")
+    assert d["consumable"] == "beer" and d["consumable_fine"] == "yes"
+    assert d["cape"] is None and d["ring0"] is None
+    assert gearset.decode_link(gd, unquote(gearset.encode_link(gd, lo, "brew_beer").split("q=")[1]))["recipe"] == "brew_beer"
