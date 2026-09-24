@@ -261,6 +261,47 @@ class Searcher:
                 lo = cand
         return lo
 
+    def side_benefits(self, lo: Loadout) -> tuple[float, ...]:
+        """Per-step rates of everything the objective might ignore; higher is better in every component."""
+        ev = evaluate(self.space.ctx, lo, self.statics, detail=False)
+        self.evals += 1
+        m = ev.metrics
+        per_step = 1 / m["steps_per_reward_roll"]
+        table = lambda kind: per_step * sum(d["per_roll"] for d in ev.drops if d["table"] == kind)
+        return (
+            per_step,
+            per_step * m["fine_chance_per_roll"],
+            table("chestTable"), table("gem"), table("collectible"), table("birdNest"),
+            per_step * sum(d["per_roll"] for d in ev.special),
+            sum(m["xp_per_step"].values()),
+            m["inventory_space"],
+            m["quality_outcome"],
+        )
+
+    def fill_empty(self, lo: Loadout) -> Loadout:
+        """Put side benefits (tokens, chests, collectibles, XP...) into slots the objective left empty.
+        An item goes in only if it leaves the objective no worse and no side benefit lower."""
+        while True:
+            base_s, base_b = self.score(lo)[:2], self.side_benefits(lo)
+            best, best_gain = None, 0.0
+            for slot in self.space.slots:
+                if slot in self.space.locked or lo.slots.get(slot):
+                    continue
+                for s, v in self.moves(lo, slot):
+                    cand = self.apply(lo, s, v)
+                    if self.score(cand)[:2] > base_s:
+                        continue
+                    b = self.side_benefits(cand)
+                    if any(x < y - 1e-12 for x, y in zip(b, base_b)):
+                        continue
+                    # relative gain per component, so rare drops count as much as common ones
+                    gain = sum((x - y) / y if y > 0 else (1.0 if x > y else 0.0) for x, y in zip(b, base_b))
+                    if gain > best_gain + 1e-9:
+                        best, best_gain = cand, gain
+            if best is None:
+                return lo
+            lo = best
+
     def set_seeds(self, lo: Loadout) -> list[Loadout]:
         """For each keyword set bonus, force in the pieces we own and let hill climbing sort out the rest."""
         gd = self.space.ctx.gd
@@ -305,7 +346,7 @@ class Searcher:
         return min(results, key=self.score)
 
 
-def optimize(
+def prepare(
     ctx: Context,
     objective: Objective,
     pool: list[OwnedItem],
@@ -315,13 +356,27 @@ def optimize(
     locked: dict[str, object] | None = None,
     exclude: set[str] | None = None,
     secondary: Objective | None = None,
-) -> tuple[Loadout, Searcher]:
+) -> tuple[Searcher, Loadout]:
     space = build_space(ctx, pool, pets, consumables, locked, exclude)
     searcher = Searcher(space, objective, secondary)
     start = start or Loadout(pet=pets[0] if len(pets) == 1 else None,
                              consumable=consumables[0] if len(consumables) == 1 else None)
     # the starting loadout may include items not in the pruned pool or tool slots we don't have
     start = Loadout({s: i for s, i in start.slots.items() if s in space.slots}, start.pet, start.consumable)
+    return searcher, start
+
+
+def quick_score(searcher: Searcher, start: Loadout) -> tuple:
+    """Greedy fill only: a cheap estimate that ranks activities almost like the full search does."""
+    lo = start.copy()
+    for slot, val in searcher.space.locked.items():
+        lo = searcher.apply(lo, slot, val)
+    return searcher.score(searcher.greedy(lo))
+
+
+def optimize(ctx: Context, objective: Objective, pool: list[OwnedItem], pets: list[tuple[str, int] | None],
+             consumables: list[tuple[str, bool] | None], **kw) -> tuple[Loadout, Searcher]:
+    searcher, start = prepare(ctx, objective, pool, pets, consumables, **kw)
     return searcher.run(start), searcher
 
 

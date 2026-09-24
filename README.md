@@ -56,6 +56,8 @@ The step and drop formulas are ported from the official planner's optimiser work
 
 The optimizer builds a loadout greedily, then hill-climbs one slot at a time, including the pet and consumable. It also seeds each set bonus so multi-piece sets get a fair trial.
 
+Afterwards, any slot the objective left empty is filled with gear that adds side benefits: tokens, chests, gems, collectibles, fine materials, XP, inventory space. A piece goes in only if it leaves the objective and every other side benefit no worse.
+
 ### Not modelled
 
 - Crafting service bonuses. For recipes, the service requirement is assumed met.

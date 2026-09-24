@@ -12,13 +12,14 @@ from pathlib import Path
 from . import gearset, sync
 from .engine import Context, Loadout, drop_report, evaluate, gear_source, history_key, slot_type
 from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, strip_markup
-from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout
+from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
 from .paths import player_file, player_info_file, snapshot_dir
 from .player import OwnedItem, Player, parse_save
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
 STAMP_WINDOW = 24 * 3600  # a snapshot this fresh is assumed to match the loaded save's game version
+RANK_FULL_SEARCH = 40  # rank_activities runs the full search on at most this many (or 3x top) candidates
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
@@ -516,6 +517,9 @@ class Service:
             results.append((searcher.score(lo), loc, ctx, lo, searcher, start))
         results.sort(key=lambda r: r[0])
         score, loc, ctx, lo, searcher, start = results[0]
+        bare = lo
+        lo = searcher.fill_empty(bare)
+        filled = [s for s, oi in lo.items() if not bare.slots.get(s)]
         ctx.assumed_history.clear()  # report only what the final and current loadouts depend on
         ev = evaluate(ctx, lo)
 
@@ -566,6 +570,10 @@ class Service:
             f"({searcher.space.pruned_count} irrelevant ones skipped), {searcher.evals} loadouts evaluated.",
             "'Chance to find' items (e.g. Adventurers' Guild tokens) roll once per reward roll, as in the official planner.",
         ]
+        if filled:
+            out["notes"].append(
+                "Slots the objective left empty were filled with side benefits (tokens, chests, collectibles, "
+                f"fine materials, XP...) that cost nothing: {', '.join(SLOT_LABELS.get(s, s) for s in filled)}.")
         return out
 
     def _missing_upgrades(self, ctx, obj, pets, consumables, require_items, exclude, owned_score) -> dict:
@@ -597,7 +605,7 @@ class Service:
         if special:
             acts = list(gd.activities)
         pool = list(self._player.owned_gear.values()) if (owned_only and self._player) else all_gear_pool(gd)
-        rows = []
+        cands = []
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
                 ctx = self._context(aid, loc)
@@ -606,10 +614,20 @@ class Service:
                 if any(r["type"] in ("abilityAvailable",) for r in ctx.activity.get("visibilityRequirements") or []):
                     continue
                 start, locked = self._start_and_locks(ctx, [], owned_only, pets, consumables)
-                lo, s = optimize(ctx, obj, pool, pets, consumables, start=start, locked=locked)
-                sc = s.score(lo)
-                if sc[0] == 0 and not math.isinf(sc[1]):
-                    rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
+                searcher, start = prepare(ctx, obj, pool, pets, consumables, start=start, locked=locked)
+                cands.append((ctx, loc, searcher, start))
+        # A greedy fill ranks activities almost like the full search, so only the most promising get the full
+        # search. Its requirement penalty is ignored: greedy sometimes misses a required tool that the full
+        # search finds. Checked on all 45 "chance to find" items: identical top 10/20, worst case needed 29/36.
+        if len(cands) > RANK_FULL_SEARCH:
+            quick = [quick_score(sr, st)[1:] for _, _, sr, st in cands]
+            order = sorted(range(len(cands)), key=lambda i: quick[i])
+            cands = [cands[i] for i in order[:max(RANK_FULL_SEARCH, 3 * top)]]
+        rows = []
+        for ctx, loc, searcher, start in cands:
+            sc = searcher.score(searcher.run(start))
+            if sc[0] == 0 and not math.isinf(sc[1]):
+                rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
         rows.sort()
         return {
             "target": gd.name(tid),

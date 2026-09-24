@@ -70,6 +70,18 @@ def test_optimizer_improves_ag_tokens(gd, player):
     assert math.isfinite(best)
 
 
+
+def test_fill_empty_adds_free_side_benefits(gd, player):
+    # the actions objective leaves rings empty; filling them must not cost steps and should add the token ring
+    ctx = Context.for_player(gd, player, "surface_swimming", "farsand_coast")
+    obj = Objective("actions")
+    lo, searcher = optimize(ctx, obj, list(player.owned_gear.values()), [("pixie", 3)], [None])
+    filled = searcher.fill_empty(lo)
+    assert searcher.score(filled)[:2] <= searcher.score(lo)[:2]
+    assert all(a >= b for a, b in zip(searcher.side_benefits(filled), searcher.side_benefits(lo)))
+    assert "adventuring_ring" in {oi.id for oi in filled.slots.values() if oi}
+    assert set(s for s, _ in lo.items()) < set(s for s, _ in filled.items())
+
 def test_history_requirement(gd):
     from walkscape_mcp.engine import check_requirement
     r = {"type": "historyData", "requirement": {"category": "actionCompleted", "data": "classic_skiing", "value": 50}}
