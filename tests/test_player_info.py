@@ -40,3 +40,9 @@ def test_unusable_history_skipped_without_losing_the_rest(svc):
     assert out["reached"] == ["Classic skiing completed 50+ times"]
     assert out["notes"] == ["Unlocked achievement: Human Fish"]
     assert len(out["skipped"]) == 2 and "Mine gold ore" in out["skipped"][0]
+
+
+def test_forget_then_add_replaces_a_note(svc):
+    svc.remember_player_info(notes=["Progress: honeycomb 20/100"])
+    out = svc.remember_player_info(forget=["honeycomb"], notes=["Progress: honeycomb 33/100"])
+    assert out["notes"] == ["Progress: honeycomb 33/100"]

@@ -201,6 +201,12 @@ class Service:
                              notes: list[str] | None = None, forget: list[str] | None = None) -> dict:
         info = self._info()
         met = info["history"]
+        # forget first, so one call can replace a note or entry without deleting its replacement
+        for x in forget or []:
+            info["notes"] = [n for n in info["notes"] if x.lower() not in n.lower()]
+            for k in list(met):
+                if x.lower() in self._history_label(k, met[k]).lower():
+                    del met[k]
         skipped = []  # one unusable entry shouldn't discard the rest of the call
 
         def parse(entry, pick):
@@ -227,11 +233,6 @@ class Service:
         for n in notes or []:
             if n not in info["notes"]:
                 info["notes"].append(n)
-        for x in forget or []:
-            info["notes"] = [n for n in info["notes"] if x.lower() not in n.lower()]
-            for k in list(met):
-                if x.lower() in self._history_label(k, met[k]).lower():
-                    del met[k]
         player_info_file().write_text(json.dumps(info, indent=1) + "\n")
         out = self._describe_info(info)
         if skipped:
