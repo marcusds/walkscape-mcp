@@ -222,7 +222,40 @@ class Searcher:
             extra.append("consumable")
         return extra + self.space.slots
 
+    def _place_keyword(self, lo: Loadout, kw: str, need: int) -> tuple[Loadout, int]:
+        """Put up to `need` distinct items carrying `kw` into free slots (empty ones first). Returns (loadout, count)."""
+        gd = self.space.ctx.gd
+        have = sum(kw in (gd.items[oi.id].get("keywords") or []) for _, oi in lo.items())
+        free = [s for s in self.space.slots if s not in self.space.locked]
+        free.sort(key=lambda s: lo.slots.get(s) is not None)
+        for slot in free:
+            if have >= need:
+                break
+            cur = lo.slots.get(slot)
+            if cur and kw in (gd.items[cur.id].get("keywords") or []):
+                continue
+            options = [c for c in self.space.candidates.get(slot_type(slot), [])
+                       if kw in c.keywords and not _conflicts(self.space, lo, slot, c) and c.oi not in lo.slots.values()]
+            if options:
+                best = min(options, key=lambda c: self.score(self.apply(lo, slot, c.oi)))
+                lo = self.apply(lo, slot, best.oi)
+                have += 1
+        return lo, have
+
+    def meet_gear_requirements(self, lo: Loadout) -> Loadout:
+        """Equip enough keyword items for requirements like "3+ diving gear". Adding one piece at a time never
+        clears such a requirement, so greedy and hill climbing alone can't get there."""
+        for r in self.space.ctx.activity.get("requirements") or []:
+            q = r.get("requirement") or {}
+            if r["type"] == "distinctKeywordItemsEquipped":
+                for kw in q.get("keywords") or []:
+                    lo, _ = self._place_keyword(lo, kw, q.get("quantity", 1))
+            elif r["type"] == "keywordEquipped":
+                lo, _ = self._place_keyword(lo, q.get("keyword"), 1)
+        return lo
+
     def greedy(self, lo: Loadout) -> Loadout:
+        lo = self.meet_gear_requirements(lo)
         # fill most-constrained slots first, as the official planner does
         order = sorted(self.all_slots(), key=lambda s: len(self.space.candidates.get(slot_type(s), [])))
         for slot in order:
@@ -315,22 +348,7 @@ class Searcher:
                                 set_kws[k] = max(set_kws.get(k, 0), r["requirement"].get("quantity", 1))
         seeds = []
         for kw in set_kws:
-            seed = lo.copy()
-            placed = 0
-            for slot in self.space.slots:
-                if slot in self.space.locked:
-                    continue
-                cur = seed.slots.get(slot)
-                if cur and kw in (gd.items[cur.id].get("keywords") or []):
-                    placed += 1
-                    continue
-                options = [c for c in self.space.candidates.get(slot_type(slot), [])
-                           if kw in c.keywords and not _conflicts(self.space, seed, slot, c)
-                           and c.oi not in seed.slots.values()]
-                if options:
-                    best = min(options, key=lambda c: self.score(self.apply(seed, slot, c.oi)))
-                    seed = self.apply(seed, slot, best.oi)
-                    placed += 1
+            seed, placed = self._place_keyword(lo.copy(), kw, len(self.space.slots))
             if placed >= 2:
                 seeds.append(seed)
         return seeds

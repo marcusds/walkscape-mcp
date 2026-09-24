@@ -77,6 +77,7 @@ class Player:
     pets: list[dict]  # {"name","species","level","equipped"}
     reputation: dict[str, float]
     unknown_ids: list[str] = field(default_factory=list)
+    item_counts: dict[str, tuple[int, int]] = field(default_factory=dict)  # item id -> (normal, fine) in bank + inventory
 
     @property
     def skill_levels(self) -> dict[str, int]:
@@ -112,6 +113,7 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
     all_ids: set[str] = set()
     unknown: list[str] = []
     consumables: dict[str, int] = {}
+    counts: dict[str, list[int]] = {}
 
     def add(raw: str, count: int = 1):
         item_id, q, fine = split_quality(gd, raw)
@@ -138,6 +140,8 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         for raw, n in (save.get(src) or {}).items():
             if n:
                 add(raw, n)
+                item_id, _, fine = split_quality(gd, raw)
+                counts.setdefault(item_id, [0, 0])[fine] += n
     for raw, n in (save.get("consumables") or {}).items():
         add(raw, n)
 
@@ -163,4 +167,5 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         pets=pets,
         reputation=save.get("reputation") or {},
         unknown_ids=sorted(set(unknown)),
+        item_counts={k: (v[0], v[1]) for k, v in counts.items()},
     )

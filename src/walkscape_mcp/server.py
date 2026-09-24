@@ -11,7 +11,11 @@ and an offline copy of the WalkScape wiki.
 
 Workflow:
 1. If no character is loaded, ask the user to paste their exported character JSON and call load_player_save.
-2. Resolve names loosely: tools accept in-game names ("Crown of Cinders", "Adventurers' Guild token").
+2. Resolve names loosely: tools accept in-game names ("Crown of Cinders", "Adventurers' Guild token"), so call
+   get_activity/get_item/optimize_loadout directly instead of search_game_data first. Make independent calls in parallel.
+   get_activity already marks each requirement against the character and, for recipes, shows how many of each
+   material they have and where it comes from; rank_activities lists blocked sources and why. Use these instead of
+   follow-up lookups.
 3. For "best loadout for X" requests call optimize_loadout. Map the user's goal to an objective:
 {chr(10).join(f"   - {k}: {v}" for k, v in OBJECTIVES.items())}
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
@@ -120,20 +124,24 @@ def evaluate_loadout(
 def rank_activities(target: str, top: int = 10, pet: str | None = "current", consumable: str | None = "none",
                     owned_only: bool = True) -> dict:
     """Rank activities/locations by steps needed to obtain an item, each with its own optimized owned loadout.
-    For 'chance to find' items (like Adventurers' Guild tokens) every activity is considered."""
+    For 'chance to find' items (like Adventurers' Guild tokens) every activity is considered.
+    Also returns how many the character has, sources they can't use yet with the unmet requirements, and
+    non-activity sources (recipes, chests) when no activity works."""
     return s().rank_activities(target, top, pet, consumable, owned_only)
 
 
 @mcp.tool()
 def get_item(name: str) -> dict:
     """Item details: slot, keywords, requirements, attributes at every quality, consumable effects,
-    which qualities the player owns, and where the item comes from."""
+    which qualities the player owns, how many they have, and where the item comes from."""
     return s().item_info(name)
 
 
 @mcp.tool()
 def get_activity(name: str) -> dict:
-    """Activity or recipe details: requirements, locations, base/min steps, XP, and base drop rates."""
+    """Activity or recipe details: requirements (marked met/NOT MET for the loaded character, with their level),
+    locations, base/min steps, XP, base drop rates. Recipes also list each material with how many the character
+    has and where it comes from."""
     return s().activity_info(name)
 
 

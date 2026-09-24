@@ -82,6 +82,13 @@ def test_fill_empty_adds_free_side_benefits(gd, player):
     assert "adventuring_ring" in {oi.id for oi in filled.slots.values() if oi}
     assert set(s for s, _ in lo.items()) < set(s for s, _ in filled.items())
 
+
+def test_meets_multi_piece_gear_requirement(gd, player):
+    # "3+ diving gear" can't be reached one piece at a time; the optimizer must place the pieces together
+    ctx = Context.for_player(gd, player, "merfolk_farm_foraging", "elaras_lagoon")
+    lo, _ = optimize(ctx, Objective("item", "underwater_lotus"), list(player.owned_gear.values()), [None], [None])
+    assert evaluate(ctx, lo).valid
+
 def test_history_requirement(gd):
     from walkscape_mcp.engine import check_requirement
     r = {"type": "historyData", "requirement": {"category": "actionCompleted", "data": "classic_skiing", "value": 50}}

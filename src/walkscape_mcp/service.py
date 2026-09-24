@@ -10,7 +10,9 @@ import time
 from pathlib import Path
 
 from . import gearset, sync
-from .engine import Context, Loadout, drop_report, evaluate, gear_source, history_key, slot_type
+from .engine import (
+    GEAR_DEPENDENT_REQS, Context, Loadout, check_requirement, drop_report, evaluate, gear_source, history_key, slot_type,
+)
 from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, strip_markup
 from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
 from .paths import player_file, player_info_file, snapshot_dir
@@ -293,8 +295,15 @@ class Service:
                 "fine": [gd.describe_attr(a) for a in gd.consumable_attrs(item_id, True)],
                 "duration": item["buffs"][0].get("duration"),
             }
+        if self._player:
+            out["you_have"] = self._have(item_id)
+        out["sources"] = self._sources(item_id, 40)
+        return out
+
+    def _sources(self, item_id: str, limit: int) -> list[str]:
+        gd = self.gd
         srcs = []
-        for s in gd.item_sources.get(item_id, [])[:40]:
+        for s in gd.item_sources.get(item_id, [])[:limit]:
             if s["kind"] == "activity":
                 a = gd.activities[s["id"]]
                 srcs.append(f"activity: {a['name']} @ {', '.join(gd.locations[l]['name'] for l in gd.activity_locations(s['id']))}")
@@ -304,7 +313,29 @@ class Service:
                 srcs.append(f"container: {gd.name(s['id'])}")
             elif s["kind"] == "recipe":
                 srcs.append(f"recipe: {gd.recipes[s['id']]['name']}")
-        out["sources"] = srcs
+        return srcs
+
+    def _have(self, item_id: str) -> str:
+        n, fine = self._player.item_counts.get(item_id, (0, 0))
+        return f"{n}" + (f" (+{fine} fine)" if fine else "")
+
+    def _requirement_status(self, ctx: Context, reqs: list[dict]) -> list[str]:
+        """Requirements marked against the loaded character, so callers don't need a separate lookup."""
+        out = []
+        for r in reqs or []:
+            desc = describe_requirement(r)
+            if not self._player:
+                out.append(desc)
+            elif r["type"] in GEAR_DEPENDENT_REQS:
+                out.append(f"{desc} [gear: optimize_loadout handles it]")
+            elif r["type"] == "service":
+                out.append(f"{desc} [service: done at a location that has it]")
+            else:
+                ok = check_requirement(r, ctx, None)
+                mine = ""
+                if r["type"] == "skillLevel":
+                    mine = f", you: {ctx.skill_levels.get(r['requirement'].get('skill'), 1)}"
+                out.append(f"{desc} [{'met' if ok else 'NOT MET'}{mine}]")
         return out
 
     def activity_info(self, name: str) -> dict:
@@ -313,9 +344,10 @@ class Service:
         a = gd.activity_like(aid)
         ctx = Context(gd, aid, (gd.activity_locations(aid) or [None])[0], {s: 99 for s in gd.skills})
         base = evaluate(ctx, Loadout(), statics=[])
+        pctx = self._context(aid, (gd.activity_locations(aid) or [None])[0]) if self._player else ctx
         out = {
             "id": aid, "name": a["name"], "kind": kind, "skills": a.get("relatedSkillsList"),
-            "requirements": [describe_requirement(r) for r in a.get("requirements") or []],
+            "requirements": self._requirement_status(pctx, a.get("requirements") or []),
             "locations": [gd.locations[l]["name"] for l in gd.activity_locations(aid)],
             "base_steps": a.get("workRequired"), "max_work_efficiency": a.get("maxWorkEfficiency"),
             "min_steps": base.metrics["min_possible_steps_per_completion"],
@@ -323,9 +355,18 @@ class Service:
             "base_drops_no_gear": [{k: v for k, v in r.items() if k != "id"} for r in drop_report(base)],
         }
         if kind == "recipe":
-            out["materials"] = [[f"{o['amount']}x {gd.name(o['item'])}" for o in m["options"]] for m in a.get("materials") or []]
+            out["materials"] = [[self._material(o) for o in m["options"]] for m in a.get("materials") or []]
             out["outputs"] = {gd.name(k): v for k, v in (a.get("itemRewards") or {}).items()}
         return out
+
+    def _material(self, o: dict) -> str:
+        """'1x Sea cabbage (have 0; from activity: Merfolk farm foraging @ Elara's Lagoon)'."""
+        gd, iid = self.gd, o["item"]
+        extra = [f"have {self._have(iid)}"] if self._player else []
+        srcs = self._sources(iid, 3)
+        if srcs:
+            extra.append("from " + "; ".join(srcs))
+        return f"{o['amount']}x {gd.name(iid)}" + (f" ({'; '.join(extra)})" if extra else "")
 
     def location_info(self, name: str) -> dict:
         gd = self.gd
@@ -621,11 +662,14 @@ class Service:
         if special:
             acts = list(gd.activities)
         pool = list(self._player.owned_gear.values()) if (owned_only and self._player) else all_gear_pool(gd)
-        cands = []
+        cands, blocked = [], []
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
                 ctx = self._context(aid, loc)
                 if self._player and ctx.skill_levels.get(ctx.main_skill, 0) < ctx.required_level:
+                    if not special:  # every activity is a source of "chance to find" items; don't list them all
+                        blocked.append((ctx, loc, [f"{ctx.main_skill} lvl {ctx.required_level} "
+                                                   f"(you: {ctx.skill_levels.get(ctx.main_skill, 1)})"]))
                     continue
                 if any(r["type"] in ("abilityAvailable",) for r in ctx.activity.get("visibilityRequirements") or []):
                     continue
@@ -641,15 +685,26 @@ class Service:
             cands = [cands[i] for i in order[:max(RANK_FULL_SEARCH, 3 * top)]]
         rows = []
         for ctx, loc, searcher, start in cands:
-            sc = searcher.score(searcher.run(start))
+            lo = searcher.run(start)
+            sc = searcher.score(lo)
             if sc[0] == 0 and not math.isinf(sc[1]):
                 rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
+            elif sc[0] and not special:
+                blocked.append((ctx, loc, evaluate(ctx, lo).unmet_activity_requirements))
         rows.sort()
-        return {
+        out = {
             "target": gd.name(tid),
             "ranking": [{"activity": a, "location": l, "steps_per_item": round(v, 1)} for v, a, l in rows[:top]],
             "note": "Each row uses its own optimized loadout; use optimize_loadout on a row for the gear.",
         }
+        if self._player:
+            out["you_have"] = self._have(tid)
+        if blocked:
+            out["blocked_sources"] = [{"activity": c.activity["name"], "location": gd.locations[l]["name"] if l else None,
+                                       "unmet": u} for c, l, u in blocked[:10]]
+        if not rows:
+            out["other_sources"] = [x for x in self._sources(tid, 10) if not x.startswith("activity:")]
+        return out
 
     def decode_gear_set(self, gear_set: str) -> dict:
         gd = self.gd
