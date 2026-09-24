@@ -17,13 +17,23 @@ uv run python -m walkscape_mcp.sync        # first snapshot (~6 min)
 claude mcp add --scope user walkscape -- uv run --directory "$PWD" walkscape-mcp
 ```
 
-Then in Claude, paste your character export (in-game: Settings → Export character data) and ask away. The save is stored so you only paste it again when your gear or levels change.
+Then in Claude, paste your character export (in-game: Settings → Export character data) and ask away. The save is stored so you only paste it again when your gear or levels change. The wiki dump downloads by itself the first time it's needed.
+
+The export leaves out some things, such as how many times you've completed an activity. Some gear bonuses and activities unlock after a number of completions (skis, skydiscs, diving gear). Results assume these unlocks are reached and list them, and Claude asks whether you have. A "yes" is saved in `player_info.json`, along with any achievements or other facts you mention, and survives pasting a new save. A "not yet" lasts only for the current session, because your counts keep growing.
+
+To maintain the hand-ported logic (see [Keeping it up to date](#keeping-it-up-to-date)), also run:
+
+```sh
+uv run walkscape-drift --init              # create the local, untracked reference copies
+ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
+```
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `load_player_save` / `player_summary` | Load and inspect your character export |
+| `remember_player_info` | Store what the export lacks: action-history unlocks you've reached, achievements and other notes |
 | `optimize_loadout` | Best loadout for an activity/recipe and objective, using owned gear; shows the diff from your current gear, unowned upgrades and an export string |
 | `evaluate_loadout` | Stats, steps and drop rates for your current gear or a gear-set string |
 | `rank_activities` | Where to farm an item in the fewest steps |
@@ -62,7 +72,7 @@ uv run walkscape-drift            # report; exit 1 on drift
 uv run walkscape-drift --accept   # after updating the code, record new references
 ```
 
-The planner JavaScript and wiki text are copyrighted by their authors, so those references are not in git. They are kept locally only. On a fresh clone, run `walkscape-drift --accept` once to create them. Until then the first report compares against nothing.
+The planner JavaScript and wiki text are copyrighted by their authors, so those references are not in git. They are kept locally only. On a fresh clone, `walkscape-drift --init` creates them without touching the tracked references. Don't use `--accept` for this: it would also overwrite the tracked references and hide any real drift since the last commit.
 
 The `walkscape-update` Claude Code skill (`.claude/skills/walkscape-update`, symlinked into `~/.claude/skills`) covers the whole routine: refresh, check for drift, fix, test, accept and commit. Ask Claude to "update walkscape" after a game update.
 

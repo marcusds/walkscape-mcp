@@ -54,7 +54,7 @@ This also downloads the newest wiki dump.
 uv run --directory /mnt/storage1/workspace/walkscape-mcp walkscape-drift --skip planner wiki save
 ```
 
-Exit code 0 means no drift. WARN lines are informational: a planner rebuild with identical logic, a stale save, or missing references.
+Exit code 0 means no drift. WARN lines are informational: a planner rebuild with identical logic, a stale save, or missing references. If the untracked planner JS or wiki references are missing (a fresh clone), run `walkscape-drift --init` first. It creates only the missing files.
 
 ### 4. Triage each DRIFT item
 

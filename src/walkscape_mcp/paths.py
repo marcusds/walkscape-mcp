@@ -25,3 +25,8 @@ def wiki_dir() -> Path:
 
 def player_file() -> Path:
     return home() / "player.json"
+
+
+def player_info_file() -> Path:
+    """Facts the user told us that the save export doesn't contain (kept across save reloads)."""
+    return home() / "player_info.json"

@@ -68,3 +68,16 @@ def test_optimizer_improves_ag_tokens(gd, player):
     # only one pickaxe (banned keyword), never duplicated items
     assert sum("pickaxe" in (gd.items[i].get("keywords") or []) for i in ids) == 1
     assert math.isfinite(best)
+
+
+def test_history_requirement(gd):
+    from walkscape_mcp.engine import check_requirement
+    r = {"type": "historyData", "requirement": {"category": "actionCompleted", "data": "classic_skiing", "value": 50}}
+    key = "actionCompleted:classic_skiing"
+    unknown = Context(gd, "mine_gold_ore", None, {})
+    assert check_requirement(r, unknown, None)
+    assert unknown.assumed_history == {(key, 50)}
+    met = Context(gd, "mine_gold_ore", None, {}, history_met={key: 50})
+    assert check_requirement(r, met, None) and not met.assumed_history
+    not_met = Context(gd, "mine_gold_ore", None, {}, history_not_met={key: 50})
+    assert not check_requirement(r, not_met, None) and not not_met.assumed_history

@@ -17,6 +17,9 @@ Workflow:
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
 4. For "where should I farm X" call rank_activities.
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
+6. When the user mentions something about their character that the save export doesn't contain (how many times
+   they've done an activity, travel steps, achievements, quests, unlocks), call remember_player_info so it persists.
+   If results note assumed action history, ask the user whether they've reached each one and record the answer.
 
 Present results as a slot-by-slot table, the key numbers vs current gear, and the gear_set_export string
 (importable at gear.walkscape.app). Mention notes/assumptions briefly.
@@ -44,6 +47,28 @@ def load_player_save(save_json: str) -> dict:
 def player_summary() -> dict:
     """Summary of the currently loaded character (skill levels, equipped gear, pets, consumables)."""
     return s().player_summary()
+
+
+@mcp.tool()
+def remember_player_info(
+    completed: list[str] | None = None,
+    not_yet: list[str] | None = None,
+    notes: list[str] | None = None,
+    forget: list[str] | None = None,
+) -> dict:
+    """Store facts about the character that the save export doesn't include. Kept across sessions and save reloads.
+
+    Some gear bonuses and activities unlock after completing an activity N times (skis, skydiscs, diving gear,
+    log splitters) or walking N travel steps. The save has no such history, so results assume these are reached
+    and list them in notes. Ask the user, then record:
+    completed: requirements the user has reached, e.g. ["Classic skiing"], ["travel steps 125000"]. Saved permanently.
+    not_yet: ones they haven't reached. Remembered for this session only, since the counts keep growing; ask again later.
+    An entry is an activity name, optionally followed by the count; without a count, completed means the highest
+    threshold in the game and not_yet the lowest.
+    notes: free-form facts, e.g. "Unlocked achievement: Master Angler", "Finished the bank repair quest".
+    forget: remove notes or reached entries containing this text.
+    Returns everything currently remembered."""
+    return s().remember_player_info(completed, not_yet, notes, forget)
 
 
 @mcp.tool()

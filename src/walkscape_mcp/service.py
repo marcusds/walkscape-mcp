@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from pathlib import Path
 
 from . import gearset, sync
-from .engine import Context, Loadout, drop_report, evaluate, gear_source, slot_type
+from .engine import Context, Loadout, drop_report, evaluate, gear_source, history_key, slot_type
 from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, strip_markup
 from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout
-from .paths import player_file, snapshot_dir
+from .paths import player_file, player_info_file, snapshot_dir
 from .player import OwnedItem, Player, parse_save
 from .wiki import Wiki
 
@@ -27,6 +28,7 @@ class Service:
         self._player: Player | None = None
         self._refresh_thread: threading.Thread | None = None
         self._refresh_error: str | None = None
+        self._not_met: dict[str, float] = {}  # session only; see remember_player_info
         self.wiki = Wiki()
         self._snap_mtime = 0.0
         self._reload_snapshot()
@@ -125,11 +127,102 @@ class Service:
         player = parse_save(self.gd, data)
         player_file().write_text(json.dumps(data))
         self._player = player
-        out = player.summary(self.gd)
+        out = {**player.summary(self.gd), "remembered_info": self._describe_info(self._info())}
         if not self.gd.meta.get("game_version"):
             self._stamp_version(player.game_version)
         elif self._needs_refresh(player.game_version):
             out["note"] = self.refresh_in_background(player.game_version)
+        return out
+
+    # ---------- facts the save doesn't contain ----------
+    # Action-history requirements are thresholds on counts that only grow, so only "reached" is persisted.
+    # "Not yet" goes stale as the user plays, so it's kept for this session only and asked again later.
+
+    def _info(self) -> dict:
+        f = player_info_file()
+        try:
+            data = json.loads(f.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        return {"history": data.get("history") or {}, "notes": data.get("notes") or []}
+
+    def _context(self, activity_id: str, location_id: str | None) -> Context:
+        return Context.for_player(self.gd, self._player, activity_id, location_id,
+                                  history_met=self._info()["history"], history_not_met=self._not_met)
+
+    def _history_thresholds(self) -> dict[str, list[float]]:
+        """Every action-history threshold in the game data, by key."""
+        gd = self.gd
+        if getattr(self, "_thresholds_for", None) is not gd:
+            out: dict[str, set] = {}
+
+            def walk(o):
+                if isinstance(o, dict):
+                    if o.get("type") == "historyData" and isinstance(o.get("requirement"), dict):
+                        q = o["requirement"]
+                        out.setdefault(history_key(q.get("category", ""), q.get("data")), set()).add(q.get("value", 0))
+                    for v in o.values():
+                        walk(v)
+                elif isinstance(o, list):
+                    for v in o:
+                        walk(v)
+
+            walk(gd.snap)
+            self._thresholds, self._thresholds_for = {k: sorted(v) for k, v in out.items()}, gd
+        return self._thresholds
+
+    def _history_label(self, key: str, value: float) -> str:
+        category, _, data = key.partition(":")
+        if category == "actionCompleted" and data:
+            act = self.gd.activities.get(data) or self.gd.recipes.get(data)
+            return f"{act['name'] if act else data} completed {value:,g}+ times"
+        if category == "stepsWalkedTraveling":
+            return f"{value:,g}+ steps walked while travelling"
+        return f"{key} >= {value:,g}"
+
+    def _parse_history(self, entry: str, pick) -> tuple[str, float]:
+        """'Classic skiing', 'Classic skiing 50' or 'travel steps 125000' -> (key, threshold)."""
+        m = re.fullmatch(r"(.*?)[\s:>=]*([\d,]+)", entry.strip())
+        name, value = (m.group(1), float(m.group(2).replace(",", ""))) if m else (entry.strip(), None)
+        if "travel" in name.lower() and "step" in name.lower():
+            key = history_key("stepsWalkedTraveling")
+        else:
+            _, aid = self._resolve_any(name, ["activity", "recipe"])
+            key = history_key("actionCompleted", aid)
+        levels = self._history_thresholds().get(key)
+        if not levels:
+            raise KeyError(f"Nothing in the game depends on {entry!r} (no action-history requirement for it).")
+        return key, value if value is not None else pick(levels)
+
+    def remember_player_info(self, completed: list[str] | None = None, not_yet: list[str] | None = None,
+                             notes: list[str] | None = None, forget: list[str] | None = None) -> dict:
+        info = self._info()
+        met = info["history"]
+        for entry in completed or []:
+            key, v = self._parse_history(entry, max)
+            met[key] = max(met.get(key, 0), v)
+            if self._not_met.get(key, math.inf) <= v:
+                del self._not_met[key]
+        for entry in not_yet or []:
+            key, v = self._parse_history(entry, min)
+            self._not_met[key] = min(self._not_met.get(key, math.inf), v)
+            if met.get(key, -1) >= v:
+                del met[key]
+        for n in notes or []:
+            if n not in info["notes"]:
+                info["notes"].append(n)
+        for x in forget or []:
+            info["notes"] = [n for n in info["notes"] if x.lower() not in n.lower()]
+            for k in list(met):
+                if x.lower() in self._history_label(k, met[k]).lower():
+                    del met[k]
+        player_info_file().write_text(json.dumps(info, indent=1) + "\n")
+        return self._describe_info(info)
+
+    def _describe_info(self, info: dict) -> dict:
+        out = {"reached": [self._history_label(k, v) for k, v in info["history"].items()], "notes": info["notes"]}
+        if self._not_met:
+            out["not_yet_this_session"] = [self._history_label(k, v) for k, v in self._not_met.items()]
         return out
 
     def player(self) -> Player:
@@ -139,7 +232,7 @@ class Service:
         return self._player
 
     def player_summary(self) -> dict:
-        return self.player().summary(self.gd)
+        return {**self.player().summary(self.gd), "remembered_info": self._describe_info(self._info())}
 
     # ---------- lookups ----------
 
@@ -365,7 +458,7 @@ class Service:
         gd = self.gd
         _, aid = self._resolve_any(activity, ["activity", "recipe"])
         loc = self._locations_for(aid, location)[0]
-        ctx = Context.for_player(gd, self._player, aid, loc)
+        ctx = self._context(aid, loc)
         notes = []
         if gear_set:
             lo, notes = gearset.decode(gd, gear_set)
@@ -389,6 +482,10 @@ class Service:
 
     def _context_notes(self, ctx: Context) -> list[str]:
         notes = []
+        if ctx.assumed_history:
+            need = "; ".join(sorted(self._history_label(k, v) for k, v in ctx.assumed_history))
+            notes.append(f"Assumed reached (the save has no action history): {need}. Ask the user whether they have, "
+                         "and record it with remember_player_info (completed or not_yet).")
         if ctx.unverified:
             notes.append(f"Requirement types not modelled (assumed satisfied): {sorted(ctx.unverified)}")
         if ctx.is_recipe:
@@ -413,12 +510,13 @@ class Service:
 
         results = []
         for loc in self._locations_for(aid, location):
-            ctx = Context.for_player(gd, self._player, aid, loc)
+            ctx = self._context(aid, loc)
             start, locked = self._start_and_locks(ctx, require_items or [], owned_only, pets, consumables)
             lo, searcher = optimize(ctx, obj, pool, pets, consumables, start=start, locked=locked, exclude=exclude)
             results.append((searcher.score(lo), loc, ctx, lo, searcher, start))
         results.sort(key=lambda r: r[0])
         score, loc, ctx, lo, searcher, start = results[0]
+        ctx.assumed_history.clear()  # report only what the final and current loadouts depend on
         ev = evaluate(ctx, lo)
 
         out: dict = {
@@ -455,6 +553,7 @@ class Service:
             if not math.isinf(cur_score[1]) and not math.isinf(score[1]) and cur_score[1] > 0:
                 out["vs_current_gear"]["improvement"] = f"{(1 - score[1] / cur_score[1]) * 100:.1f}% fewer steps per unit" if obj.kind not in ("xp", "total_xp") else f"{(cur_score[1] / score[1] - 1) * 100:.1f}% more XP/step"
 
+        notes = self._context_notes(ctx)
         if owned_only and show_missing_upgrades and self._player:
             out["unowned_upgrades"] = self._missing_upgrades(ctx, obj, pets, consumables, require_items, exclude, score)
 
@@ -462,7 +561,7 @@ class Service:
             out["gear_set_export"] = gearset.encode(gd, lo)
         except Exception as e:
             out["gear_set_export"] = f"(export failed: {e})"
-        out["notes"] = self._context_notes(ctx) + [
+        out["notes"] = notes + [
             f"Searched {sum(len(v) for v in searcher.space.candidates.values())} candidate items "
             f"({searcher.space.pruned_count} irrelevant ones skipped), {searcher.evals} loadouts evaluated.",
             "'Chance to find' items (e.g. Adventurers' Guild tokens) roll once per reward roll, as in the official planner.",
@@ -501,7 +600,7 @@ class Service:
         rows = []
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
-                ctx = Context.for_player(gd, self._player, aid, loc)
+                ctx = self._context(aid, loc)
                 if self._player and ctx.skill_levels.get(ctx.main_skill, 0) < ctx.required_level:
                     continue
                 if any(r["type"] in ("abilityAvailable",) for r in ctx.activity.get("visibilityRequirements") or []):

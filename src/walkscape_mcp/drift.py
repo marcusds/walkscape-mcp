@@ -10,7 +10,8 @@ sources the refresh never looks at:
   - the shape of API objects and of the player's save export
 
 References for all of these live in reference/. `walkscape-drift` reports differences;
-`walkscape-drift --accept` records the current state once the code has been updated.
+`walkscape-drift --accept` records the current state once the code has been updated;
+`walkscape-drift --init` only creates missing references (the untracked planner JS/wiki copies on a fresh clone).
 """
 
 from __future__ import annotations
@@ -97,6 +98,13 @@ def _diff(old: list[str], new: list[str], name: str, limit: int = 120) -> str:
     return "\n".join(d[:limit]) + (f"\n… {len(d) - limit} more diff lines" if len(d) > limit else "")
 
 
+def _record(path: Path, text: str, accept: str | None):
+    """accept="all" overwrites references; "missing" only creates absent ones (fresh clone)."""
+    if accept == "all" or (accept == "missing" and not path.exists()):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
 def _read_ref(path: Path):
     return json.loads(path.read_text()) if path.exists() else None
 
@@ -118,7 +126,7 @@ def fetch_planner() -> dict:
     return {"bundle": bundle_path, "worker_path": worker_path, "worker": worker, "snippets": snippets, "endpoints": endpoints}
 
 
-def check_planner(rep: Report, cur: dict, accept: bool):
+def check_planner(rep: Report, cur: dict, accept: str | None):
     d = REF / "planner"
     fp = _read_ref(d / "fingerprint.json") or {}
     if fp.get("bundle") == cur["bundle"] and fp.get("worker") == cur["worker_path"]:
@@ -127,20 +135,26 @@ def check_planner(rep: Report, cur: dict, accept: bool):
         rep.warn("Planner JS rebuilt", f"{fp.get('bundle')} -> {cur['bundle']}\n{fp.get('worker')} -> {cur['worker_path']}\n"
                  "Normalized diffs below show whether logic actually changed.")
 
-    ref_worker = (d / "optimiser.worker.js").read_text() if (d / "optimiser.worker.js").exists() else ""
-    old, new = normalize_js(ref_worker), normalize_js(cur["worker"])
-    if old == new:
+    ref_worker = (d / "optimiser.worker.js").read_text() if (d / "optimiser.worker.js").exists() else None
+    old, new = normalize_js(ref_worker or ""), normalize_js(cur["worker"])
+    if ref_worker is None:
+        rep.warn("Optimiser worker has no reference", "Run with --init (fresh clone) or --accept after reviewing.")
+    elif old == new:
         rep.ok("Optimiser worker logic (step math, caps, requirement checks, tool slots)")
     else:
         rep.drift("Optimiser worker logic changed -> review engine.compute_metrics / check_requirement, player.tool_slots",
                   _diff(old, new, "optimiser.worker.js"))
 
-    ref_snips = _read_ref(d / "snippets.json") or {}
+    ref_snips = _read_ref(d / "snippets.json")
+    if ref_snips is None:
+        rep.warn("Planner snippets have no reference", "Run with --init (fresh clone) or --accept after reviewing.")
     for name, *_ in BUNDLE_ANCHORS:
         now = cur["snippets"].get(name, [])
         if not now:
             rep.drift(f"Planner snippet '{name}' not found", "Anchor regex no longer matches; the code may have been "
                       "rewritten. Search the bundle manually and update BUNDLE_ANCHORS in drift.py.")
+            continue
+        if ref_snips is None:
             continue
         o = [l for s in ref_snips.get(name, []) for l in normalize_js(s)]
         n = [l for s in now for l in normalize_js(s)]
@@ -157,12 +171,10 @@ def check_planner(rep: Report, cur: dict, accept: bool):
     else:
         rep.ok("Planner API endpoints", f"{len(ref_ep)} endpoints")
 
-    if accept:
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "fingerprint.json").write_text(json.dumps({"bundle": cur["bundle"], "worker": cur["worker_path"]}, indent=1) + "\n")
-        (d / "optimiser.worker.js").write_text(cur["worker"])
-        (d / "snippets.json").write_text(json.dumps(cur["snippets"], indent=1) + "\n")
-        (d / "endpoints.json").write_text(json.dumps(cur["endpoints"], indent=1) + "\n")
+    _record(d / "fingerprint.json", json.dumps({"bundle": cur["bundle"], "worker": cur["worker_path"]}, indent=1) + "\n", accept)
+    _record(d / "optimiser.worker.js", cur["worker"], accept)
+    _record(d / "snippets.json", json.dumps(cur["snippets"], indent=1) + "\n", accept)
+    _record(d / "endpoints.json", json.dumps(cur["endpoints"], indent=1) + "\n", accept)
 
 
 # ---------- wiki mechanics ----------
@@ -181,7 +193,7 @@ def latest_wiki_build() -> int | None:
     return max(builds) if builds else None
 
 
-def check_wiki(rep: Report, accept: bool):
+def check_wiki(rep: Report, accept: str | None):
     from .wiki import Wiki
 
     w = Wiki()
@@ -198,12 +210,10 @@ def check_wiki(rep: Report, accept: bool):
         if f.exists() and f.read_text() == body:
             rep.ok(f"Wiki {page}")
         elif not f.exists():
-            rep.warn(f"Wiki {page} has no reference", "Run with --accept after reviewing.")
+            rep.warn(f"Wiki {page} has no reference", "Run with --init (fresh clone) or --accept after reviewing.")
         else:
             rep.drift(f"Wiki {page} changed", _diff(f.read_text().splitlines(), body.splitlines(), f.name))
-        if accept:
-            d.mkdir(parents=True, exist_ok=True)
-            f.write_text(body)
+        _record(f, body, accept)
 
     # latest game build in the wiki vs the data snapshot
     latest = latest_wiki_build()
@@ -266,7 +276,7 @@ def data_schema(snap: dict) -> dict:
     }
 
 
-def check_data(rep: Report, accept: bool):
+def check_data(rep: Report, accept: str | None):
     snap = load_snapshot()
     if not snap:
         rep.drift("No game data snapshot", "Run `uv run python -m walkscape_mcp.sync` first.")
@@ -311,11 +321,10 @@ def check_data(rep: Report, accept: bool):
             rep.drift("Game data schema changed -> check gamedata.py / engine.py parsing", "\n".join(diffs))
         else:
             rep.ok("Game data schema unchanged")
-    if accept:
-        (REF / "schema.json").write_text(json.dumps(cur, indent=1) + "\n")
+    _record(REF / "schema.json", json.dumps(cur, indent=1) + "\n", accept)
 
 
-def check_save(rep: Report, accept: bool):
+def check_save(rep: Report, accept: str | None):
     f = player_file()
     if not f.exists():
         rep.warn("No saved character export", "Ask the user to paste a fresh export and call load_player_save.")
@@ -343,30 +352,35 @@ def check_save(rep: Report, accept: bool):
         rep.ok("Character export format unchanged", f"save from game {save.get('game_version')}")
     else:
         rep.warn("No save format reference", "Run with --accept after reviewing.")
-    if accept:
-        (REF / "save_format.json").write_text(json.dumps(cur, indent=1) + "\n")
+    _record(REF / "save_format.json", json.dumps(cur, indent=1) + "\n", accept)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--accept", action="store_true", help="record current state as the new reference")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--accept", action="store_true", help="record current state as the new reference")
+    mode.add_argument("--init", action="store_true",
+                      help="create only missing references (the untracked planner JS and wiki copies after a fresh clone)")
     ap.add_argument("--skip", nargs="*", default=[], choices=["planner", "wiki", "data", "save"])
     args = ap.parse_args(argv)
+    accept = "all" if args.accept else "missing" if args.init else None
     rep = Report()
     if "planner" not in args.skip:
         try:
-            check_planner(rep, fetch_planner(), args.accept)
+            check_planner(rep, fetch_planner(), accept)
         except Exception as e:
             rep.drift("Could not analyse planner JS", f"{type(e).__name__}: {e}")
     if "wiki" not in args.skip:
-        check_wiki(rep, args.accept)
+        check_wiki(rep, accept)
     if "data" not in args.skip:
-        check_data(rep, args.accept)
+        check_data(rep, accept)
     if "save" not in args.skip:
-        check_save(rep, args.accept)
+        check_save(rep, accept)
     print(rep.render())
     if args.accept:
         print("\nReferences updated in reference/.")
+    elif args.init:
+        print("\nMissing references created in reference/; existing ones were left alone, so drift above is real.")
     return 1 if rep.drifted and not args.accept else 0
 
 

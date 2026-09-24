@@ -71,6 +71,9 @@ class Context:
     owned_ids: set[str] = field(default_factory=set)
     collectibles: list[str] = field(default_factory=list)
     coins: int = 0
+    # action history (not in the save): key -> threshold the user confirmed reaching / said they haven't reached
+    history_met: dict[str, float] = field(default_factory=dict)
+    history_not_met: dict[str, float] = field(default_factory=dict)
     assume_unknown_true: bool = True
 
     def __post_init__(self):
@@ -90,11 +93,16 @@ class Context:
              if r["type"] == "skillLevel" and r["requirement"].get("skill") == self.main_skill] or [1]
         )
         self.unverified: set[str] = set()
+        self.assumed_history: set[tuple[str, float]] = set()  # history requirements the user hasn't told us about
+        self._static: dict[int, tuple] = {}  # id(requirement list) -> see static_check
 
     @classmethod
-    def for_player(cls, gd: GameData, player: Player | None, activity_id: str, location_id: str | None) -> "Context":
+    def for_player(cls, gd: GameData, player: Player | None, activity_id: str, location_id: str | None,
+                   history_met: dict[str, float] | None = None,
+                   history_not_met: dict[str, float] | None = None) -> "Context":
+        hist = {"history_met": history_met or {}, "history_not_met": history_not_met or {}}
         if player is None:
-            return cls(gd, activity_id, location_id, skill_levels={s: 99 for s in gd.skills})
+            return cls(gd, activity_id, location_id, skill_levels={s: 99 for s in gd.skills}, **hist)
         return cls(
             gd, activity_id, location_id,
             skill_levels=player.skill_levels,
@@ -104,6 +112,7 @@ class Context:
             owned_ids=player.all_item_ids,
             collectibles=player.collectibles,
             coins=player.coins,
+            **hist,
         )
 
     @property
@@ -119,6 +128,10 @@ class Equipped:
     item_ids: set[str]
     abilities: set[str]
     gear: list[tuple[str, dict]]  # (item_id, item) for keywordWithLevelEquipped
+
+
+def history_key(category: str, data: str | None = None) -> str:
+    return f"{category}:{data}" if data else category
 
 
 def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
@@ -161,7 +174,16 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
         case "totalWealth":
             ok = ctx.coins >= q.get("amount", 0)
         case "historyData":
-            ok = True
+            # not in the save export; use what the user told us, else assume done and report it
+            key = history_key(q.get("category", ""), q.get("data"))
+            need = q.get("value", 0)
+            if ctx.history_met.get(key, -math.inf) >= need:
+                ok = True
+            elif ctx.history_not_met.get(key, math.inf) <= need:
+                ok = False
+            else:
+                ctx.assumed_history.add((key, need))
+                ok = ctx.assume_unknown_true
         case "exploreRealm":
             ok = q.get("realm") in ctx.reputation
         case "distinctKeywordItemsEquipped":
@@ -189,6 +211,22 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
 
 def check_all(reqs, ctx: Context, eq: Equipped | None) -> bool:
     return all(check_requirement(r, ctx, eq) for r in reqs or [])
+
+
+def static_check(reqs, ctx: Context) -> tuple[bool, list, set, set, object]:
+    """Split a requirement list into the part that only depends on the context (checked once and cached)
+    and the gear-dependent part. Returns (static ok, gear requirements, assumed history, unverified types);
+    the assumptions are returned rather than recorded so callers only report them when they mattered.
+    The cache entry holds a reference to `reqs`, so its id can't be reused while the context lives."""
+    c = ctx._static.get(id(reqs))
+    if c is None or c[4] is not reqs:
+        hist, unver = ctx.assumed_history, ctx.unverified
+        ctx.assumed_history, ctx.unverified = set(), set()
+        ok = all(check_requirement(r, ctx, None) for r in reqs or [] if r["type"] not in GEAR_DEPENDENT_REQS)
+        gear = [r for r in reqs or [] if r["type"] in GEAR_DEPENDENT_REQS]
+        c = ctx._static[id(reqs)] = (ok, gear, ctx.assumed_history, ctx.unverified, reqs)
+        ctx.assumed_history, ctx.unverified = hist, unver
+    return c
 
 
 # ---------- attribute sources ----------
@@ -223,6 +261,13 @@ def gear_source(gd: GameData, oi: OwnedItem) -> Source:
 
 
 def pet_source(gd: GameData, species: str, level: int) -> Source:
+    _GD_REGISTRY[id(gd)] = gd
+    return _pet_source_cached(id(gd), species, level)
+
+
+@lru_cache(maxsize=1024)
+def _pet_source_cached(gd_id: int, species: str, level: int) -> Source:
+    gd = _GD_REGISTRY[gd_id]
     pet = gd.pets[species]
     return Source("pet", species, f"{pet['name']} pet (lvl {level})", gd.pet_attrs(species, level),
                   abilities=tuple(gd.pet_abilities(species, level)))
@@ -434,7 +479,10 @@ def evaluate(ctx: Context, lo: Loadout, statics: list[Source] | None = None, det
         for a in src.attrs:
             if not a.get("stats"):
                 continue
-            if check_all(a.get("requirements"), ctx, eq):
+            ok, gear_reqs, hist, unver, _ = static_check(a.get("requirements"), ctx)
+            if ok and all(check_requirement(r, ctx, eq) for r in gear_reqs):
+                ctx.assumed_history |= hist
+                ctx.unverified |= unver
                 active_attrs.append(a)
                 if detail:
                     active.append((src.label, gd.describe_attr(a)))
@@ -449,7 +497,14 @@ def evaluate(ctx: Context, lo: Loadout, statics: list[Source] | None = None, det
     # recipes' service requirements are assumed met (you choose where to craft)
     unmet = [r for r in ctx.activity.get("requirements") or []
              if r["type"] != "service" and not check_requirement(r, ctx, eq)]
-    invalid = [s.label for s in sources if s.kind == "gear" and not check_all((s.item or {}).get("requirements"), ctx, None)]
+    invalid = []
+    for s in sources:
+        if s.kind == "gear":
+            ok, _, hist, unver, _ = static_check((s.item or {}).get("requirements"), ctx)
+            ctx.assumed_history |= hist
+            ctx.unverified |= unver
+            if not ok:
+                invalid.append(s.label)
     from .gamedata import describe_requirement
     return Evaluation(stats, metrics, drops, special, active, inactive,
                       [describe_requirement(r) for r in unmet], invalid, eq.abilities)
