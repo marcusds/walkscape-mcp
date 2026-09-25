@@ -1379,6 +1379,7 @@ class Service:
                 rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
             elif sc[0] and not special:
                 blocked.append((ctx, loc, evaluate(ctx, lo).unmet_activity_requirements))
+        rows.sort()
         src = self._near(near)
         dist = self._base_distances(src)[0] if src else {}
         loc_id = {v["name"]: k for k, v in gd.locations.items()}

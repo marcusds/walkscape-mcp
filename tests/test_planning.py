@@ -12,6 +12,7 @@ def test_remembered_location_is_the_default_start(svc):
 def test_rank_counts_travel_from_near(svc):
     out = svc.rank_activities("Flax", top=3, near="Kallaheim")
     rows = out["ranking"]
+    assert [r["steps_per_item"] for r in rows] == sorted(r["steps_per_item"] for r in rows)
     assert out["from"] == "Kallaheim" and all("travel_steps" in r for r in rows)
     closer = [r for r in rows[1:] if "better_than_fastest_below" in r]
     assert closer and closer[0]["travel_steps"] < rows[0]["travel_steps"]
@@ -50,6 +51,7 @@ def test_inventory_fill_counts_partial_stacks(svc):
 def test_rank_fine_items(svc):
     out = svc.rank_activities("Bell pepper", fine=True)
     rows = out["ranking"]
+    assert [r["steps_per_fine_item"] for r in rows] == sorted(r["steps_per_fine_item"] for r in rows)
     assert out["target"] == "Bell pepper (fine)"
     assert rows[0]["activity"] == "Summer cave foraging"
     assert rows[0]["steps_per_fine_item"] < rows[1]["steps_per_fine_item"]
