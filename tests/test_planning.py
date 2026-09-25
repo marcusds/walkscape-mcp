@@ -99,3 +99,10 @@ def test_two_copies_of_a_ring_can_be_worn(svc):
                                    show_missing_upgrades=False)
         rings = [v["item"] for k, v in out["loadout"]["slots"].items() if k.startswith("ring")]
         assert rings.count("Adventuring ring (epic)") == 2
+
+
+def test_rounding_noise_does_not_leave_slots_empty():
+    from walkscape_mcp.optimizer import _worse
+
+    assert not _worse((0, 97499.99999999993), (0, 97499.99999999991))
+    assert _worse((0, 97500.1), (0, 97499.9)) and _worse((1, 1.0), (0, 2.0))

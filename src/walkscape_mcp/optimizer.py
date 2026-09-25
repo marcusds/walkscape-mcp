@@ -181,6 +181,14 @@ def _conflicts(space: SearchSpace, lo: Loadout, slot: str, cand: Candidate) -> b
     return False
 
 
+def _worse(score: tuple, base: tuple) -> bool:
+    """Objective scores (penalty, value; lower is better) compared with float tolerance, so gear that changes
+    nothing isn't rejected over rounding noise."""
+    if score[0] != base[0]:
+        return score[0] > base[0]
+    return score[1] > base[1] + 1e-9 * max(1.0, abs(base[1]))
+
+
 class Searcher:
     def __init__(self, space: SearchSpace, objective: Objective, secondary: Objective | None = None):
         self.space = space
@@ -345,7 +353,7 @@ class Searcher:
                     continue
                 for s, v in self.moves(lo, slot):
                     cand = self.apply(lo, s, v)
-                    if self.score(cand)[:2] > base_s:
+                    if _worse(self.score(cand)[:2], base_s):
                         continue
                     b = self.side_benefits(cand)
                     if any(x < y - 1e-12 for x, y in zip(b, base_b)):
@@ -374,7 +382,7 @@ class Searcher:
                 if _conflicts(self.space, lo, slot, c):
                     continue
                 cand = self.apply(lo, slot, c.oi)
-                if self.score(cand)[:2] > base_s:
+                if _worse(self.score(cand)[:2], base_s):
                     continue
                 if any(x < y - 1e-12 for x, y in zip(self.side_benefits(cand), base_b)):
                     continue
