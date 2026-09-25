@@ -266,7 +266,8 @@ def describe_requirement(r: dict) -> str:
         case "activityType":
             s = f"doing {q.get('activity') or q.get('keywords')}"
         case "achievementPoint":
-            s = f"{q.get('value')}+ achievement points"
+            s = (f"{q.get('value', 0):.0%} of all achievement points" if q.get("isPercentage")
+                 else f"{q.get('value')}+ achievement points")
         case "traveling":
             s = "while travelling"
         case "itemAnywhere" | "itemAnywhereWithYou":

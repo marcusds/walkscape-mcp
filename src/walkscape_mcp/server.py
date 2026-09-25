@@ -24,6 +24,7 @@ Workflow:
    Crafting N of something -> plan_recipe; crafting gear of a quality (Perfect, Eternal...) -> craft_quality; "how long to level X" -> steps_to_level; "when is my inventory full"
    -> inventory_fill. Several items at once -> targets on rank_activities / optimize_loadout (objective "items").
    Remember where the player is (remember_player_info location) so travel-aware tools start there.
+   Away from a bank, the player can only use gear they carry: pass carried_only=true (ask if unsure).
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
 6. When the user mentions something about their character that the save export doesn't contain (how many times
    they've done an activity, travel steps, achievements, quests, unlocks), call remember_player_info so it persists.
@@ -77,6 +78,9 @@ def remember_player_info(
     goals_done: list[str] | None = None,
     regions_explored: list[str] | None = None,
     location: str | None = None,
+    reputation: dict[str, float] | None = None,
+    achievement_points: int | None = None,
+    carrying: list[str] | None = None,
 ) -> dict:
     """Store facts about the character that the save export doesn't include. Kept across sessions and save reloads.
 
@@ -106,11 +110,14 @@ def remember_player_info(
     regions_explored: regions the user has fully explored, e.g. ["Jarvonia"] (unlocks exploreRealm requirements).
     location: where the character is now; travel-aware tools start from here when not told otherwise.
       Update it whenever the user mentions where they are or arrive somewhere.
+    reputation: faction reputation now, e.g. {"Jarvonia": 61}. achievement_points: the in-game total now.
+    carrying: all gear the player has with them (equipped + inventory), replacing the save's; carried_only
+      tools use it. A fresh save export is the easiest way to update it.
     Returns everything currently remembered."""
     return s().remember_player_info(completed, not_yet, notes, forget,
                                     achievements_unlocked, achievement_progress, achievements_not_unlocked,
                                     gear_found, skill_levels, item_counts, goals, goals_done, regions_explored,
-                                    location)
+                                    location, reputation, achievement_points, carrying)
 
 
 @mcp.tool()
@@ -134,6 +141,7 @@ def optimize_loadout(
     owned_only: bool = True,
     show_missing_upgrades: bool = True,
     targets: dict[str, int] | None = None,
+    carried_only: bool = False,
 ) -> dict:
     """Find the best gear loadout for an activity (or crafting recipe).
 
@@ -148,11 +156,12 @@ def optimize_loadout(
     require_items: items that must stay equipped, e.g. ["Adoring fan statue", "Farganite pickaxe (epic)"].
     exclude_items: items to never use.
     owned_only: only use gear the player owns (default). False = theoretical best-in-slot.
+    carried_only: only gear that's equipped or in the inventory, for when the player isn't at a bank.
     show_missing_upgrades: also report the best loadout using unowned gear.
     Returns the loadout per slot with active effects, metrics, drop rates, diff vs current gear, and an export string.
     """
     return s().optimize_loadout(activity, objective, target, location, pet, consumable, require_items,
-                                exclude_items, owned_only, show_missing_upgrades, targets)
+                                exclude_items, owned_only, show_missing_upgrades, targets, carried_only)
 
 
 @mcp.tool()
@@ -173,7 +182,7 @@ def evaluate_loadout(
 def rank_activities(target: str | None = None, top: int = 10, pet: str | None = "current",
                     consumable: str | None = "none", owned_only: bool = True,
                     targets: dict[str, int] | None = None, near: str | None = None,
-                    quantity: int | None = None, fine: bool = False) -> dict:
+                    quantity: int | None = None, fine: bool = False, carried_only: bool = False) -> dict:
     """Rank activities/locations by steps needed to obtain an item, each with its own optimized owned loadout.
     For 'chance to find' items (like Adventurers' Guild tokens) every activity is considered.
     targets: several items at once with quantities, e.g. {"Flax": 50, "Honeycomb": 59}; ranks by steps until
@@ -182,9 +191,10 @@ def rank_activities(target: str | None = None, top: int = 10, pet: str | None = 
       rows that are closer but slower say below how many items they beat the fastest.
     quantity: how many of `target` are wanted; with a start location, ranks by travel + farming steps.
     fine: rank by steps per fine version of `target` (fine material finding gear) instead.
+    carried_only: only gear that's equipped or in the inventory, for when the player isn't at a bank.
     Also returns how many the character has, sources they can't use yet with the unmet requirements, and
     non-activity sources (recipes, chests) when no activity works."""
-    return s().rank_activities(target, top, pet, consumable, owned_only, targets, near, quantity, fine)
+    return s().rank_activities(target, top, pet, consumable, owned_only, targets, near, quantity, fine, carried_only)
 
 
 @mcp.tool()
@@ -222,7 +232,8 @@ def decode_gear_set(gear_set: str) -> dict:
 
 @mcp.tool()
 def plan_route(destination: str, start: str | None = None, via: list[str] | None = None,
-               avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True) -> dict:
+               avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True,
+               carried_only: bool = False) -> dict:
     """Fastest travel route between two locations with the best travel gear for each leg.
 
     Picks the route by steps with optimized gear (not base distance), skipping legs whose terrain requirements
@@ -230,9 +241,10 @@ def plan_route(destination: str, start: str | None = None, via: list[str] | None
     via: locations to pass through in order (e.g. to compare an overland and an underwater route).
     start: where the trip begins (default: remembered current location).
     avoid: locations to route around.
+    carried_only: only gear that's equipped or in the inventory, for when the player isn't at a bank.
     Returns each leg with base and optimized steps, the gear whenever it changes (with planner_link), and the best
     single loadout for the whole trip (planner_link and gear_set_export) for users who don't want to swap."""
-    return s().plan_route(destination, start, via, avoid, pet, owned_only)
+    return s().plan_route(destination, start, via, avoid, pet, owned_only, carried_only)
 
 
 @mcp.tool()

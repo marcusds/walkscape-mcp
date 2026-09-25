@@ -76,6 +76,7 @@ class Context:
     history_not_met: dict[str, float] = field(default_factory=dict)
     explored: set[str] = field(default_factory=set)  # regions the user said they've fully explored
     service: dict | None = None  # recipes: the crafting service used ({"id", "name", "attrs", ...})
+    achievement_points_total: int | None = None  # all achievement points in the game, for "50% of points" checks
     assume_unknown_true: bool = True
 
     def __post_init__(self):
@@ -156,7 +157,14 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
         case "characterLevel":
             ok = ctx.char_level >= q.get("level", 0)
         case "achievementPoint":
-            ok = ctx.achievement_points >= q.get("value", 0)
+            if q.get("isPercentage"):
+                if ctx.achievement_points_total:
+                    ok = ctx.achievement_points >= q.get("value", 0) * ctx.achievement_points_total - 1e-9
+                else:
+                    ctx.unverified.add("achievementPoint (percentage; achievement list unavailable)")
+                    ok = ctx.assume_unknown_true
+            else:
+                ok = ctx.achievement_points >= q.get("value", 0)
         case "totalSkillLevel":
             ok = sum(ctx.skill_levels.values()) >= q.get("levels", 0)
         case "totalSkillLevelUps":

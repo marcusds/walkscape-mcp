@@ -78,6 +78,7 @@ class Player:
     reputation: dict[str, float]
     unknown_ids: list[str] = field(default_factory=list)
     item_counts: dict[str, tuple[int, int]] = field(default_factory=dict)  # item id -> (normal, fine) in bank + inventory
+    carried_gear: dict[str, OwnedItem] = field(default_factory=dict)  # equipped + inventory (not the bank)
 
     @property
     def skill_levels(self) -> dict[str, int]:
@@ -130,20 +131,26 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         owned[oi.key()] = oi
         return oi
 
-    equipped = {}
+    equipped, carried = {}, {}
     for slot, raw in (save.get("gear") or {}).items():
         if raw:
             oi = add(raw)
             if oi:
-                equipped[slot] = oi
+                equipped[slot] = carried[oi.key()] = oi
     for src in ("inventory", "bank"):
         for raw, n in (save.get(src) or {}).items():
             if n:
-                add(raw, n)
+                oi = add(raw, n)
+                if oi and src == "inventory":
+                    carried[oi.key()] = oi
                 item_id, _, fine = split_quality(gd, raw)
                 counts.setdefault(item_id, [0, 0])[fine] += n
     for raw, n in (save.get("consumables") or {}).items():
         add(raw, n)
+    for raw, n in (save.get("currencies") or {}).items():  # e.g. Adventurers' Guild tokens, chips
+        if n and raw in gd.items:
+            all_ids.add(raw)
+            counts.setdefault(raw, [0, 0])[0] += n
 
     pets = []
     if (save.get("pets") or {}).get("pet"):
@@ -168,6 +175,7 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         reputation=save.get("reputation") or {},
         unknown_ids=sorted(set(unknown)),
         item_counts={k: (v[0], v[1]) for k, v in counts.items()},
+        carried_gear=carried,
     )
 
 
@@ -175,15 +183,21 @@ def with_updates(gd: GameData, player: Player, since: dict) -> Player:
     """Apply what the user reported after exporting the save: gear found, skill levels, item counts.
     `since` is player_info's "since_save" section; entries the save already covers were pruned on load."""
     owned, ids, xp, counts = dict(player.owned_gear), set(player.all_item_ids), dict(player.skill_xp), dict(player.item_counts)
+    reputation = {**player.reputation, **{f: e["value"] for f, e in (since.get("reputation") or {}).items()}}
+    points = ((since.get("points") or {}).get("total") or {}).get("value", player.achievement_points)
+    carried = dict(player.carried_gear)
     for key in since.get("gear") or {}:
         item_id, _, quality = key.partition("@")
         if item_id in gd.items:
-            owned[key] = OwnedItem(item_id, quality)
+            owned[key] = carried[key] = OwnedItem(item_id, quality)  # found gear lands in the inventory
             ids.add(item_id)
+    if (c := (since.get("carried") or {}).get("now")) and c.get("items") is not None:  # what's with them now
+        carried = {k: owned[k] for k in c["items"] if k in owned}
     for skill, e in (since.get("skills") or {}).items():
         xp[skill] = max(xp.get(skill, 0), SKILL_XP[min(e["level"], len(SKILL_XP)) - 1])
     for item_id, e in (since.get("items") or {}).items():
         counts[item_id] = (e["count"], counts.get(item_id, (0, 0))[1])
         if e["count"]:
             ids.add(item_id)
-    return replace(player, owned_gear=owned, all_item_ids=ids, skill_xp=xp, item_counts=counts)
+    return replace(player, owned_gear=owned, all_item_ids=ids, skill_xp=xp, item_counts=counts,
+                   reputation=reputation, achievement_points=points, carried_gear=carried)

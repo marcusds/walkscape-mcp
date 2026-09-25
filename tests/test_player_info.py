@@ -136,3 +136,27 @@ def test_goals_and_explored_regions(svc):
     out = svc.remember_player_info(goals_done=["cooking"], forget=["points"])
     assert out["goals"] == ["190 points for Treasure hunter bandolier"]
     assert svc._context("brew_beer", None).explored == {"wrentmark"}
+
+
+def test_reputation_points_and_carried_gear_since_save(svc):
+    base_rep = svc._player.reputation.get("jarvonia", 0)
+    carried_before = set(svc._player.carried_gear)
+    assert carried_before and carried_before < set(svc._player.owned_gear)  # equipped + inventory, not the bank
+    out = svc.remember_player_info(reputation={"Jarvonia": base_rep + 50}, achievement_points=133,
+                                   carrying=["Flippy spatula", "Oak skis"])
+    assert svc._player.reputation["jarvonia"] == base_rep + 50
+    assert svc._player.achievement_points == 133
+    assert {oi.id for oi in svc._player.carried_gear.values()} <= {"flippy_spatula", "oak_skis"}
+    assert any("Jarvonia reputation" in x for x in out["since_last_save"])
+    assert svc._pool(carried_only=True) == list(svc._player.carried_gear.values())
+
+
+def test_percentage_achievement_requirement(svc):
+    from walkscape_mcp.engine import check_requirement
+
+    ctx = svc._context("brew_beer", None)
+    half = {"type": "achievementPoint", "requirement": {"isPercentage": True, "value": 0.5}}
+    ctx.achievement_points_total, ctx.achievement_points = 265, 132
+    assert not check_requirement(half, ctx, None)
+    ctx.achievement_points = 133  # the Cape of Half-Achiever unlocked at 133 of 265
+    assert check_requirement(half, ctx, None)

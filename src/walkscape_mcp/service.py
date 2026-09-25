@@ -62,6 +62,7 @@ SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "f
                  "mysterious_merchant")
 STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
 NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
+SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried")
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
@@ -206,7 +207,7 @@ class Service:
         info = {"history": data.get("history") or {}, "notes": data.get("notes") or [],
                 "achievements": data.get("achievements") or {}, "goals": data.get("goals") or [],
                 "explored": data.get("explored") or [], "location": data.get("location"),
-                "since_save": {k: (data.get("since_save") or {}).get(k) or {} for k in ("gear", "skills", "items")}}
+                "since_save": {k: (data.get("since_save") or {}).get(k) or {} for k in SINCE_SAVE_SECTIONS}}
         for n in list(info["notes"]):
             if m := ACHIEVEMENT_NOTE.fullmatch(n):
                 info["achievements"].setdefault(m["name"], {})["unlocked"] = True
@@ -234,6 +235,9 @@ class Service:
             ("gear", lambda k, e: k in save.owned_gear),
             ("skills", lambda k, e: levels.get(k, 0) >= e["level"]),
             ("items", lambda k, e: False),
+            ("reputation", lambda k, e: save.reputation.get(k, 0) >= e["value"]),
+            ("points", lambda k, e: save.achievement_points >= e["value"]),
+            ("carried", lambda k, e: False),
         ):
             for k, e in list(since[section].items()):
                 if covered(k, e) or e.get("at_steps", 0) < save.steps:
@@ -247,6 +251,12 @@ class Service:
             return f"{self.gd.name(item_id)} ({q})"
         if section == "skills":
             return f"{key} {e['level']}"
+        if section == "reputation":
+            return f"{key.replace('_', ' ').title()} reputation {e['value']:g}"
+        if section == "points":
+            return f"{e['value']} achievement points"
+        if section == "carried":
+            return f"carrying {len(e['items'])} gear pieces (equipped + inventory)"
         return f"{e['count']:,} {self.gd.name(key)}"
 
     def _realms(self) -> dict[str, str]:
@@ -256,6 +266,12 @@ class Service:
             if f := loc.get("faction"):
                 out[f] = f.replace("_", " ").title()
         return out
+
+    def _achievement_total(self) -> int | None:
+        """Every achievement point in the game (for "50% of all points" requirements), from the wiki's list."""
+        if getattr(self, "wiki", None) is None:
+            return None
+        return sum(a["points"] for a in self.achievement_list().values()) or None
 
     def achievement_list(self) -> dict[str, dict]:
         """Every achievement on the wiki's Achievements page, by name. Empty if the wiki is unavailable."""
@@ -293,6 +309,7 @@ class Service:
         ctx = Context.for_player(self.gd, self._player, activity_id, location_id,
                                  history_met=info["history"], history_not_met=self._not_met,
                                  explored=set(info["explored"]))
+        ctx.achievement_points_total = self._achievement_total()
         if activity_id in self.gd.recipes and location_id and (sv := self._recipe_service_at(activity_id, location_id)):
             # the service's bonuses count like gear; gear it needs (e.g. diving gear) becomes a requirement
             ctx.service = sv
@@ -409,7 +426,8 @@ class Service:
                              gear_found: list[str] | None = None, skill_levels: dict[str, int] | None = None,
                              item_counts: dict[str, int] | None = None, goals: list[str] | None = None,
                              goals_done: list[str] | None = None, regions_explored: list[str] | None = None,
-                             location: str | None = None) -> dict:
+                             location: str | None = None, reputation: dict[str, float] | None = None,
+                             achievement_points: int | None = None, carrying: list[str] | None = None) -> dict:
         with self._info_lock():
             info = self._info()
             skipped: list[str] = []  # one unusable entry shouldn't discard the rest of the call
@@ -418,7 +436,8 @@ class Service:
                     info["location"] = self.gd.resolve(location, "location")
                 except KeyError as e:
                     skipped.append(e.args[0])
-            self._remember_since_save(info, gear_found, skill_levels, item_counts, skipped)
+            self._remember_since_save(info, gear_found, skill_levels, item_counts, skipped, reputation,
+                                      achievement_points, carrying)
             for g in goals_done or []:
                 info["goals"] = [x for x in info["goals"] if g.lower() not in x.lower()]
             info["goals"] += [g for g in goals or [] if g not in info["goals"]]
@@ -433,8 +452,31 @@ class Service:
         self._apply_updates(info)
         return out
 
-    def _remember_since_save(self, info: dict, gear, skills, items, skipped: list[str]):
+    def _remember_since_save(self, info: dict, gear, skills, items, skipped: list[str], reputation=None,
+                             points=None, carrying=None):
         since, at = info["since_save"], {"at_steps": self._save.steps if getattr(self, "_save", None) else 0}
+        factions = {norm(k): k for k in (self._save.reputation if getattr(self, "_save", None) else {})}
+        factions |= {norm(k): k for k in self.gd.reputation_key_to_faction.values()}
+        for name, value in (reputation or {}).items():
+            if (f := factions.get(norm(name))) is None:
+                skipped.append(f"No faction {name!r}. Factions: {sorted(set(factions.values()))}")
+                continue
+            since["reputation"][f] = {"value": float(value), **at}
+        if points is not None:
+            since["points"]["total"] = {"value": int(points), **at}
+        if carrying is not None:
+            keys = []
+            for spec in carrying:
+                try:
+                    iid, q = self._parse_item_spec(spec)
+                except KeyError as e:
+                    skipped.append(e.args[0])
+                    continue
+                owned = [k for k, oi in self._player.owned_gear.items() if oi.id == iid and (not q or oi.quality == q.lower())]
+                if not owned:
+                    skipped.append(f"You don't own {spec!r}")
+                keys += owned[:1] if not q else owned
+            since["carried"]["now"] = {"items": keys, **at}
         for spec in gear or []:
             try:
                 iid, q = self._parse_item_spec(spec)
@@ -538,7 +580,7 @@ class Service:
             out["regions_explored"] = [self._realms().get(r, r) for r in info["explored"]]
         since = info.get("since_save") or {}
         if any(since.values()):
-            out["since_last_save"] = [self._since_label(sec, k, e) for sec in ("gear", "skills", "items")
+            out["since_last_save"] = [self._since_label(sec, k, e) for sec in SINCE_SAVE_SECTIONS
                                       for k, e in (since.get(sec) or {}).items()]
         if self._not_met:
             out["not_yet_this_session"] = [self._history_label(k, v) for k, v in self._not_met.items()]
@@ -764,6 +806,13 @@ class Service:
                 q = q.strip(" )")
         return self.gd.resolve(spec.strip(), "item"), q
 
+    def _pool(self, owned_only: bool = True, carried_only: bool = False) -> list[OwnedItem]:
+        """Gear to optimize with: everything owned, only what's equipped or in the inventory (away from a bank),
+        or every item in the game."""
+        if not (owned_only and self._player):
+            return all_gear_pool(self.gd)
+        return list((self._player.carried_gear if carried_only else self._player.owned_gear).values())
+
     def _start_and_locks(self, ctx: Context, require: list[str], owned_only: bool, pets, consumables):
         start = player_loadout(self._player) if self._player else Loadout()
         start.pet = pets[0] if len(pets) == 1 else start.pet
@@ -960,7 +1009,8 @@ class Service:
     def optimize_loadout(self, activity: str, objective: str, target: str | None = None, location: str | None = None,
                          pet: str | None = "current", consumable: str | None = "none", require_items: list[str] | None = None,
                          exclude_items: list[str] | None = None, owned_only: bool = True,
-                         show_missing_upgrades: bool = True, targets: dict[str, int] | None = None) -> dict:
+                         show_missing_upgrades: bool = True, targets: dict[str, int] | None = None,
+                         carried_only: bool = False) -> dict:
         gd = self.gd
         _, aid = self._resolve_any(activity, ["activity", "recipe"])
         obj = self._objective(objective, target, targets)
@@ -969,7 +1019,7 @@ class Service:
         exclude = {gd.resolve(x, "item") for x in exclude_items or []}
         if owned_only and not self._player:
             owned_only = False
-        pool = list(self._player.owned_gear.values()) if owned_only else all_gear_pool(gd)
+        pool = self._pool(owned_only, carried_only)
 
         results = []
         for loc in self._locations_for(aid, location):
@@ -1159,7 +1209,8 @@ class Service:
         }
 
     def plan_route(self, destination: str, start: str | None = None, via: list[str] | None = None,
-                   avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True) -> dict:
+                   avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True,
+                   carried_only: bool = False) -> dict:
         gd = self.gd
         src = self._near(start)
         if src is None:
@@ -1167,9 +1218,7 @@ class Service:
         stops = [src, *(gd.resolve(x, "location") for x in [*(via or []), destination])]
         avoided = {gd.resolve(x, "location") for x in avoid or []}
         graph = self._route_graph()
-        if owned_only and not self._player:
-            owned_only = False
-        pool = list(self._player.owned_gear.values()) if owned_only else all_gear_pool(gd)
+        pool = self._pool(owned_only, carried_only)
         pets = self._pet_options(pet)
         obj = Objective("actions")  # a double action while travelling covers two of the route's 10 actions
         gear_cache: dict[tuple, tuple] = {}  # (origin, terrain modifiers) -> (loadout, searcher)
@@ -1322,7 +1371,7 @@ class Service:
     def rank_activities(self, target: str | None = None, top: int = 10, pet: str | None = "current",
                         consumable: str | None = "none", owned_only: bool = True,
                         targets: dict[str, int] | None = None, near: str | None = None,
-                        quantity: int | None = None, fine: bool = False) -> dict:
+                        quantity: int | None = None, fine: bool = False, carried_only: bool = False) -> dict:
         """Which activity/location gives the target item(s) in the fewest steps with your best owned loadout,
         optionally counting the trip there from `near` (default: the remembered current location)."""
         gd = self.gd
@@ -1341,7 +1390,7 @@ class Service:
         acts = [x["id"] for x in srcs if x["kind"] == "activity"]
         if special:
             acts = list(gd.activities)
-        pool = list(self._player.owned_gear.values()) if (owned_only and self._player) else all_gear_pool(gd)
+        pool = self._pool(owned_only, carried_only)
         cands, blocked, hidden_until = [], [], {}
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
@@ -1426,9 +1475,10 @@ class Service:
 
     # ---------- planning ----------
 
-    def _best_loadout(self, aid: str, obj: Objective, location: str | None = None, pet: str | None = "auto"):
+    def _best_loadout(self, aid: str, obj: Objective, location: str | None = None, pet: str | None = "auto",
+                      carried_only: bool = False):
         """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location."""
-        pool = list(self._player.owned_gear.values()) if self._player else all_gear_pool(self.gd)
+        pool = self._pool(True, carried_only)
         pets = self._pet_options(pet)
         best = None
         for loc in self._locations_for(aid, location):
