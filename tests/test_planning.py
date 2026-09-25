@@ -66,3 +66,21 @@ def test_rank_fine_items(svc):
     assert rows[0]["steps_per_fine_item"] < rows[1]["steps_per_fine_item"]
     plain = svc.rank_activities("Bell pepper")["ranking"][0]
     assert plain["steps_per_item"] < rows[0]["steps_per_fine_item"]
+
+
+def test_hidden_activities_are_flagged_or_skipped(svc):
+    rows = svc.rank_activities("Bell pepper", fine=True)["ranking"]
+    summer = next(r for r in rows if r["activity"] == "Summer cave foraging")
+    assert "Spring bat tracking completed 1+ times" in summer["hidden_activity"]
+    notes = svc.optimize_loadout("Summer cave foraging", "fine_item", "Bell pepper", pet="none",
+                                 show_missing_upgrades=False)["notes"]
+    assert any(n.startswith("Hidden activity") for n in notes)
+    assert svc.activity_info("Summer cave foraging")["visibility"]["status"] == "assumed"
+
+    svc.remember_player_info(not_yet=["Spring bat tracking 1"])
+    out = svc.rank_activities("Bell pepper", fine=True)
+    assert [r["activity"] for r in out["ranking"]] == ["Swamp foraging"]
+    assert out["blocked_sources"][0]["unmet"] == ["hidden until Spring bat tracking completed 1+ times"]
+
+    svc.remember_player_info(completed=["Spring bat tracking"])
+    assert "hidden_activity" not in svc.rank_activities("Bell pepper", fine=True)["ranking"][0]

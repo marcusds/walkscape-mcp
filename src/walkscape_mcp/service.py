@@ -587,6 +587,8 @@ class Service:
             "base_steps": a.get("workRequired"), "max_work_efficiency": a.get("maxWorkEfficiency"),
             "min_steps": base.metrics["min_possible_steps_per_completion"],
             "base_xp": a.get("xpRewardsMap"),
+            **({"visibility": {"status": v[0], "unlocks_after": v[1]}}
+               if (v := self._visibility(pctx))[0] != "visible" else {}),
             "base_drops_no_gear": [{k: v for k, v in r.items() if k != "id"} for r in drop_report(base)],
         }
         if kind == "recipe":
@@ -777,8 +779,44 @@ class Service:
             "notes": notes + self._context_notes(ctx),
         }
 
+    def _req_text(self, r: dict) -> str:
+        """describe_requirement with item/activity ids replaced by their names."""
+        q, text = r.get("requirement") or {}, describe_requirement(r)
+        for v in (q.get("item"), q.get("data")):
+            if v in self.gd.items:
+                text = text.replace(v, self.gd.name(v))
+            elif v in self.gd.activities or v in self.gd.recipes:
+                text = text.replace(v, self.gd.activity_like(v)["name"])
+        return text
+
+    def _visibility(self, ctx: Context) -> tuple[str, list[str]]:
+        """Whether the activity shows up in the game for this character: ("visible" | "assumed" | "hidden" |
+        "emergency", unlock conditions). Hidden activities appear only after e.g. completing another activity;
+        the save has no action history, so unknown ones are "assumed" (and noted) unless the user said otherwise."""
+        vis = ctx.activity.get("visibilityRequirements") or []
+        if not vis:
+            return "visible", []
+        if any(r["type"] in GEAR_DEPENDENT_REQS for r in vis):
+            return "emergency", []  # only offered when you lack the gear to leave, e.g. light sources or diving gear
+        labels = [self._req_text(r) for r in vis]
+        if not all(check_requirement(r, ctx, None) for r in vis):
+            return "hidden", labels
+        unconfirmed = [r for r in vis if r["type"] == "historyData" and not r.get("opposite")
+                       and ctx.history_met.get(history_key(r["requirement"].get("category", ""),
+                                                           r["requirement"].get("data")), -math.inf)
+                       < r["requirement"].get("value", 0)]
+        return ("assumed", labels) if unconfirmed else ("visible", labels)
+
     def _context_notes(self, ctx: Context) -> list[str]:
         notes = []
+        status, unlock = self._visibility(ctx)
+        if status == "hidden":
+            notes.append(f"HIDDEN ACTIVITY: not visible in-game until {'; '.join(unlock)}.")
+        elif status == "assumed":
+            notes.append(f"Hidden activity: only visible in-game after {'; '.join(unlock)}. Assumed done; if the "
+                         "user can't find it, that's why.")
+        elif status == "emergency":
+            notes.append("Emergency activity: only offered when missing the gear to travel away.")
         if ctx.assumed_history:
             need = "; ".join(sorted(self._history_label(k, v) for k, v in ctx.assumed_history))
             notes.append(f"Assumed reached (the save has no action history): {need}. Ask the user whether they have, "
@@ -1172,7 +1210,7 @@ class Service:
         if special:
             acts = list(gd.activities)
         pool = list(self._player.owned_gear.values()) if (owned_only and self._player) else all_gear_pool(gd)
-        cands, blocked = [], []
+        cands, blocked, hidden_until = [], [], {}
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
                 ctx = self._context(aid, loc)
@@ -1181,8 +1219,16 @@ class Service:
                         blocked.append((ctx, loc, [f"{ctx.main_skill} lvl {ctx.required_level} "
                                                    f"(you: {ctx.skill_levels.get(ctx.main_skill, 1)})"]))
                     continue
-                if any(r["type"] in ("abilityAvailable",) for r in ctx.activity.get("visibilityRequirements") or []):
+                status, unlock = self._visibility(ctx)
+                if status == "emergency" or any(r["type"] == "abilityAvailable"
+                                                for r in ctx.activity.get("visibilityRequirements") or []):
                     continue
+                if status == "hidden":
+                    if not special:
+                        blocked.append((ctx, loc, [f"hidden until {x}" for x in unlock]))
+                    continue
+                if status == "assumed":
+                    hidden_until[(ctx.activity["name"], gd.locations[loc]["name"] if loc else None)] = unlock
                 start, locked = self._start_and_locks(ctx, [], owned_only, pets, consumables)
                 searcher, start = prepare(ctx, obj, pool, pets, consumables, start=start, locked=locked)
                 cands.append((ctx, loc, searcher, start))
@@ -1208,6 +1254,8 @@ class Service:
 
         def row(v, a, l):
             r = {"activity": a, "location": l, per_unit: round(v, 1)}
+            if (a, l) in hidden_until:
+                r["hidden_activity"] = f"only visible after {'; '.join(hidden_until[(a, l)])} (assumed done)"
             if src:
                 r["travel_steps"] = dist.get(loc_id.get(l), math.inf) if l else 0
                 if quantity or targets:
