@@ -160,3 +160,9 @@ def test_percentage_achievement_requirement(svc):
     assert not check_requirement(half, ctx, None)
     ctx.achievement_points = 133  # the Cape of Half-Achiever unlocked at 133 of 265
     assert check_requirement(half, ctx, None)
+
+
+def test_carrying_gear_found_in_the_same_call(svc):
+    out = svc.remember_player_info(gear_found=["Adventuring sewing needle"], carrying=["Adventuring sewing needle"])
+    assert "skipped" not in out
+    assert {oi.id for oi in svc._player.carried_gear.values()} == {"adventuring_sewing_needle"}

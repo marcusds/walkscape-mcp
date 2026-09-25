@@ -472,7 +472,10 @@ class Service:
                 except KeyError as e:
                     skipped.append(e.args[0])
                     continue
-                owned = [k for k, oi in self._player.owned_gear.items() if oi.id == iid and (not q or oi.quality == q.lower())]
+                # gear found in this same call counts as owned
+                keys_owned = {**{k: oi.id for k, oi in self._player.owned_gear.items()},
+                              **{k: k.partition("@")[0] for k in since["gear"]}}
+                owned = [k for k, i in keys_owned.items() if i == iid and (not q or k.endswith("@" + q.lower()))]
                 if not owned:
                     skipped.append(f"You don't own {spec!r}")
                 keys += owned[:1]  # list an item twice to carry two copies (e.g. two of a ring)
