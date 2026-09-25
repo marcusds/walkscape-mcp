@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from walkscape_mcp.engine import Context, Loadout, drop_report, evaluate, steps_per_item
 from walkscape_mcp.gamedata import QUALITIES
 from walkscape_mcp.optimizer import Objective, optimize, player_loadout
@@ -140,3 +142,10 @@ def test_activity_inputs_are_reported(svc):
     assert inputs[0].startswith("one arrows item (input for hunting lvl 30+)")
     notes = svc.activity_info("Repair the bank")["inputs_used_each_action"]
     assert notes[0].startswith("50x Ectoplasm")
+
+
+def test_pet_eggs_ignore_double_action_and_rewards(gd, player):
+    ctx = Context.for_player(gd, player, "treasure_hunt", "horn_of_respite")
+    ev = evaluate(ctx, player_loadout(player))
+    # wiki: 1 in 2,000 actions, whatever double action/rewards the gear has
+    assert steps_per_item(ev, "reindeer_egg") == pytest.approx(ev.metrics["steps_per_completion"] * 2000, rel=1e-6)

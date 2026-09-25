@@ -546,6 +546,13 @@ def evaluate(ctx: Context, lo: Loadout, statics: list[Source] | None = None, det
     stats = aggregate(active_attrs)
     metrics = compute_metrics(stats, ctx.activity, ctx.main_skill)
     drops = table_drops(gd, ctx.activity, stats, ctx.skill_levels)
+    # Pet eggs roll once per completion and aren't modified by any attribute (wiki: "Not modifiable by any special
+    # attributes"), so double action/rewards don't add egg rolls. Rescale to the per-reward-roll basis used below.
+    per_completion = metrics["steps_per_reward_roll"] / metrics["steps_per_completion"]
+    for d in drops:
+        if d["table"] == "petEgg":
+            for k in ("chance_per_roll", "per_roll", "fine_per_roll"):
+                d[k] *= per_completion
     # per-row XP bonuses (fish) add to the activity's XP per completion, scaled like other XP
     for d in drops:
         for skill, bonus in d["xp_bonus"].items():
