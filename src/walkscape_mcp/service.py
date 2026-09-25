@@ -907,7 +907,10 @@ class Service:
             if not oi:
                 continue
             label = gear_source(gd, oi).label
-            slots[SLOT_LABELS.get(s, s)] = {"item": label, "active_effects": by_source.get(label, [])}
+            # two copies of the same ring share a label: each shows its own share of the effects
+            copies = sum(1 for x in lo.slots.values() if x and gear_source(gd, x).label == label)
+            effects = by_source.get(label, [])
+            slots[SLOT_LABELS.get(s, s)] = {"item": label, "active_effects": effects[:len(effects) // copies]}
         other = {k: v for k, v in by_source.items() if k not in {x["item"] for x in slots.values()}}
         return {"slots": slots, "other_active_effects": other}
 
