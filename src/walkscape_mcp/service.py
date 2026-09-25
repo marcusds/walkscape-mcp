@@ -1044,7 +1044,8 @@ class Service:
             "result": obj.describe(score[1]),
             "valid": ev.valid,
             "unmet_activity_requirements": ev.unmet_activity_requirements,
-            "pool": "owned gear" if owned_only else "all gear in the game",
+            "pool": ("gear you're carrying (equipped + inventory)" if carried_only else "owned gear") if owned_only
+                    else "all gear in the game",
             "loadout": self._describe_loadout(ctx, lo, ev),
             "pet": f"{gd.pets[lo.pet[0]]['name']} lvl {lo.pet[1]}" if lo.pet else None,
             "consumable": (gd.name(lo.consumable[0]) + (" (fine)" if lo.consumable[1] else "")) if lo.consumable else None,
