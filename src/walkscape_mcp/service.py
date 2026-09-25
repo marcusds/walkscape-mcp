@@ -949,7 +949,7 @@ class Service:
         if ctx.is_recipe and ctx.service:
             sv = ctx.service
             notes.append(f"Crafted at {sv['name']} in {self.gd.locations[ctx.location_id]['name']}"
-                         + (f": {sv['attr_text']}" if sv.get("attrs") else " (no service bonuses)")
+                         + (f": {sv['attr_text'].rstrip('.')}" if sv.get("attrs") else " (no service bonuses)")
                          + ("" if sv.get("on_wiki") else "; bonuses unknown (not on the wiki's Services page)") + ".")
         elif ctx.is_recipe and self._recipe_service_req(ctx.activity_id):
             notes.append("Recipe: no usable service location found, so service bonuses aren't counted.")
