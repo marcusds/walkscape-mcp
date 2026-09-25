@@ -475,7 +475,7 @@ class Service:
                 owned = [k for k, oi in self._player.owned_gear.items() if oi.id == iid and (not q or oi.quality == q.lower())]
                 if not owned:
                     skipped.append(f"You don't own {spec!r}")
-                keys += owned[:1] if not q else owned
+                keys += owned[:1]  # list an item twice to carry two copies (e.g. two of a ring)
             since["carried"]["now"] = {"items": keys, **at}
         for spec in gear or []:
             try:
@@ -491,7 +491,8 @@ class Service:
             if q not in QUALITIES:
                 skipped.append(f"Unknown quality {q!r} for {item['name']}")
                 continue
-            since["gear"][f"{iid}@{q}"] = at
+            key = f"{iid}@{q}"
+            since["gear"][key] = {**at, "count": since["gear"].get(key, {}).get("count", 0) + 1}
         for skill, level in (skills or {}).items():
             if (sk := norm(skill)) not in self.gd.skills:
                 skipped.append(f"No skill {skill!r}")
@@ -820,7 +821,11 @@ class Service:
         or every item in the game."""
         if not (owned_only and self._player):
             return all_gear_pool(self.gd)
-        return list((self._player.carried_gear if carried_only else self._player.owned_gear).values())
+        p = self._player
+        gear, copies = (p.carried_gear, p.carried_copies) if carried_only else (p.owned_gear, p.gear_copies)
+        # a second copy of a ring can go in the other ring slot
+        return [oi for k, oi in gear.items()
+                for _ in range(min(copies.get(k, 1), 2) if self.gd.items[oi.id].get("gearType") == "ring" else 1)]
 
     def _start_and_locks(self, ctx: Context, require: list[str], owned_only: bool, pets, consumables):
         start = player_loadout(self._player) if self._player else Loadout()

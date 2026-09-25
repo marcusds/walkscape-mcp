@@ -79,6 +79,8 @@ class Player:
     unknown_ids: list[str] = field(default_factory=list)
     item_counts: dict[str, tuple[int, int]] = field(default_factory=dict)  # item id -> (normal, fine) in bank + inventory
     carried_gear: dict[str, OwnedItem] = field(default_factory=dict)  # equipped + inventory (not the bank)
+    gear_copies: dict[str, int] = field(default_factory=dict)  # key -> how many owned (two of a ring can be worn)
+    carried_copies: dict[str, int] = field(default_factory=dict)  # key -> how many equipped + in the inventory
 
     @property
     def skill_levels(self) -> dict[str, int]:
@@ -131,18 +133,23 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         owned[oi.key()] = oi
         return oi
 
-    equipped, carried = {}, {}
+    equipped, carried, copies, carried_copies = {}, {}, {}, {}
     for slot, raw in (save.get("gear") or {}).items():
         if raw:
             oi = add(raw)
             if oi:
                 equipped[slot] = carried[oi.key()] = oi
+                copies[oi.key()] = copies.get(oi.key(), 0) + 1
+                carried_copies[oi.key()] = carried_copies.get(oi.key(), 0) + 1
     for src in ("inventory", "bank"):
         for raw, n in (save.get(src) or {}).items():
             if n:
                 oi = add(raw, n)
+                if oi:
+                    copies[oi.key()] = copies.get(oi.key(), 0) + n
                 if oi and src == "inventory":
                     carried[oi.key()] = oi
+                    carried_copies[oi.key()] = carried_copies.get(oi.key(), 0) + n
                 item_id, _, fine = split_quality(gd, raw)
                 counts.setdefault(item_id, [0, 0])[fine] += n
     for raw, n in (save.get("consumables") or {}).items():
@@ -176,6 +183,8 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         unknown_ids=sorted(set(unknown)),
         item_counts={k: (v[0], v[1]) for k, v in counts.items()},
         carried_gear=carried,
+        gear_copies=copies,
+        carried_copies=carried_copies,
     )
 
 
@@ -185,14 +194,17 @@ def with_updates(gd: GameData, player: Player, since: dict) -> Player:
     owned, ids, xp, counts = dict(player.owned_gear), set(player.all_item_ids), dict(player.skill_xp), dict(player.item_counts)
     reputation = {**player.reputation, **{f: e["value"] for f, e in (since.get("reputation") or {}).items()}}
     points = ((since.get("points") or {}).get("total") or {}).get("value", player.achievement_points)
-    carried = dict(player.carried_gear)
-    for key in since.get("gear") or {}:
+    carried, copies, carried_copies = dict(player.carried_gear), dict(player.gear_copies), dict(player.carried_copies)
+    for key, e in (since.get("gear") or {}).items():
         item_id, _, quality = key.partition("@")
         if item_id in gd.items:
             owned[key] = carried[key] = OwnedItem(item_id, quality)  # found gear lands in the inventory
+            copies[key] = copies.get(key, 0) + e.get("count", 1)
+            carried_copies[key] = carried_copies.get(key, 0) + e.get("count", 1)
             ids.add(item_id)
     if (c := (since.get("carried") or {}).get("now")) and c.get("items") is not None:  # what's with them now
         carried = {k: owned[k] for k in c["items"] if k in owned}
+        carried_copies = {k: c["items"].count(k) for k in carried}
     for skill, e in (since.get("skills") or {}).items():
         xp[skill] = max(xp.get(skill, 0), SKILL_XP[min(e["level"], len(SKILL_XP)) - 1])
     for item_id, e in (since.get("items") or {}).items():
@@ -200,4 +212,5 @@ def with_updates(gd: GameData, player: Player, since: dict) -> Player:
         if e["count"]:
             ids.add(item_id)
     return replace(player, owned_gear=owned, all_item_ids=ids, skill_xp=xp, item_counts=counts,
-                   reputation=reputation, achievement_points=points, carried_gear=carried)
+                   reputation=reputation, achievement_points=points, carried_gear=carried,
+                   gear_copies=copies, carried_copies=carried_copies)

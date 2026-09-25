@@ -102,6 +102,7 @@ class SearchSpace:
     locked: dict[str, object] = field(default_factory=dict)  # slot -> OwnedItem | None | pet/consumable tuple
     pruned_count: int = 0
     extras: dict[str, list[Candidate]] = field(default_factory=dict)  # equipable but irrelevant: for complete()
+    copies: dict[str, int] = field(default_factory=dict)  # item id -> copies of its best quality in the pool
 
 
 def _banned_for(gd: GameData, keywords) -> frozenset[str]:
@@ -146,6 +147,7 @@ def build_space(
             continue
         if oi.id not in best or QUALITIES.index(oi.quality) > QUALITIES.index(best[oi.id].quality):
             best[oi.id] = oi
+    copies = {i: sum(1 for oi in pool if oi == b) for i, b in best.items()}
     equipable = [oi for oi in best.values() if check_all(gd.items[oi.id].get("requirements"), ctx, None)]
 
     useful_kw = _useful_keywords(ctx, equipable)
@@ -163,7 +165,7 @@ def build_space(
             extras.setdefault(st, []).append(cand)
             continue
         cands.setdefault(st, []).append(cand)
-    return SearchSpace(ctx, slots, cands, pets, consumables, dict(locked or {}), pruned, extras)
+    return SearchSpace(ctx, slots, cands, pets, consumables, dict(locked or {}), pruned, extras, copies)
 
 
 def _conflicts(space: SearchSpace, lo: Loadout, slot: str, cand: Candidate) -> bool:
@@ -171,8 +173,8 @@ def _conflicts(space: SearchSpace, lo: Loadout, slot: str, cand: Candidate) -> b
     for other_slot, oi in lo.slots.items():
         if other_slot == slot or not oi or slot_type(other_slot) != st:
             continue
-        if oi.id == cand.oi.id:
-            return True
+        if oi.id == cand.oi.id and not (st == "ring" and space.copies.get(oi.id, 1) >= 2):
+            return True  # the same item twice only works for two copies of a ring
         other_kws = frozenset(space.ctx.gd.items[oi.id].get("keywords") or [])
         if cand.keywords & _banned_for(space.ctx.gd, other_kws) or other_kws & cand.banned:
             return True

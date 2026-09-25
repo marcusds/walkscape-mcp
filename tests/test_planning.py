@@ -87,3 +87,15 @@ def test_loadouts_fill_every_slot(svc):
     owned_types = {svc.gd.items[oi.id]["gearType"] for oi in svc._player.owned_gear.values()}
     expected = [s for s in slots if s.rstrip("0123456789") in owned_types]
     assert len(out["loadout"]["slots"]) == len(expected)
+
+
+def test_two_copies_of_a_ring_can_be_worn(svc):
+    ring = next(oi for oi in svc._player.owned_gear.values() if svc.gd.items[oi.id]["gearType"] == "ring")
+    before = svc._pool().count(ring)
+    svc.remember_player_info(gear_found=[f"{svc.gd.name(ring.id)} ({ring.quality})"])
+    assert svc._pool().count(ring) == min(before + 1, 2)
+    if ring.id == "adventuring_ring":
+        out = svc.optimize_loadout("Treasure hunt", "item", "Adventurers' Guild token", pet="none",
+                                   show_missing_upgrades=False)
+        rings = [v["item"] for k, v in out["loadout"]["slots"].items() if k.startswith("ring")]
+        assert rings.count("Adventuring ring (epic)") == 2
