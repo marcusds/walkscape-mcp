@@ -56,3 +56,13 @@ def test_inventory_fill_counts_partial_stacks(svc):
     partial = svc.inventory_fill("Cliff foraging", 5, inventory={"Berries": 10})
     assert partial["steps_until_full"] > empty["steps_until_full"]
     assert sum(r["new_slots"] for r in empty["at_that_point"]) >= 5
+
+
+def test_rank_fine_items(svc):
+    out = svc.rank_activities("Bell pepper", fine=True)
+    rows = out["ranking"]
+    assert out["target"] == "Bell pepper (fine)"
+    assert rows[0]["activity"] == "Summer cave foraging"
+    assert rows[0]["steps_per_fine_item"] < rows[1]["steps_per_fine_item"]
+    plain = svc.rank_activities("Bell pepper")["ranking"][0]
+    assert plain["steps_per_item"] < rows[0]["steps_per_fine_item"]

@@ -173,7 +173,7 @@ def evaluate_loadout(
 def rank_activities(target: str | None = None, top: int = 10, pet: str | None = "current",
                     consumable: str | None = "none", owned_only: bool = True,
                     targets: dict[str, int] | None = None, near: str | None = None,
-                    quantity: int | None = None) -> dict:
+                    quantity: int | None = None, fine: bool = False) -> dict:
     """Rank activities/locations by steps needed to obtain an item, each with its own optimized owned loadout.
     For 'chance to find' items (like Adventurers' Guild tokens) every activity is considered.
     targets: several items at once with quantities, e.g. {"Flax": 50, "Honeycomb": 59}; ranks by steps until
@@ -181,9 +181,10 @@ def rank_activities(target: str | None = None, top: int = 10, pet: str | None = 
     near: where the player starts (default: remembered current location). Each row then gets travel_steps, and
       rows that are closer but slower say below how many items they beat the fastest.
     quantity: how many of `target` are wanted; with a start location, ranks by travel + farming steps.
+    fine: rank by steps per fine version of `target` (fine material finding gear) instead.
     Also returns how many the character has, sources they can't use yet with the unmet requirements, and
     non-activity sources (recipes, chests) when no activity works."""
-    return s().rank_activities(target, top, pet, consumable, owned_only, targets, near, quantity)
+    return s().rank_activities(target, top, pet, consumable, owned_only, targets, near, quantity, fine)
 
 
 @mcp.tool()

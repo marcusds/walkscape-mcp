@@ -1152,7 +1152,7 @@ class Service:
     def rank_activities(self, target: str | None = None, top: int = 10, pet: str | None = "current",
                         consumable: str | None = "none", owned_only: bool = True,
                         targets: dict[str, int] | None = None, near: str | None = None,
-                        quantity: int | None = None) -> dict:
+                        quantity: int | None = None, fine: bool = False) -> dict:
         """Which activity/location gives the target item(s) in the fewest steps with your best owned loadout,
         optionally counting the trip there from `near` (default: the remembered current location)."""
         gd = self.gd
@@ -1161,7 +1161,7 @@ class Service:
             tids = list(obj.targets)
         elif target:
             tid = gd.resolve(target, "item")
-            obj, tids = Objective("item", tid), [tid]
+            obj, tids = Objective("fine_item" if fine else "item", tid), [tid]
         else:
             raise ValueError("Give a target item, or targets with quantities for several at once")
         pets = self._pet_options(pet)
@@ -1204,7 +1204,7 @@ class Service:
         src = self._near(near)
         dist = self._base_distances(src)[0] if src else {}
         loc_id = {v["name"]: k for k, v in gd.locations.items()}
-        per_unit = "steps_to_get_all" if targets else "steps_per_item"
+        per_unit = "steps_to_get_all" if targets else "steps_per_fine_item" if fine else "steps_per_item"
 
         def row(v, a, l):
             r = {"activity": a, "location": l, per_unit: round(v, 1)}
@@ -1225,7 +1225,8 @@ class Service:
                 if saved > 0 and slower > 0:
                     r["better_than_fastest_below"] = f"{saved / slower:,.0f} items"
         out = {
-            "target": ", ".join(f"{n} {gd.name(i)}" for i, n in obj.targets.items()) if targets else gd.name(tids[0]),
+            "target": ", ".join(f"{n} {gd.name(i)}" for i, n in obj.targets.items()) if targets
+                      else f"{gd.name(tids[0])}{' (fine)' if fine else ''}",
             "ranking": ranked[:top],
             "note": "Each row uses its own optimized loadout; use optimize_loadout on a row for the gear.",
         }
