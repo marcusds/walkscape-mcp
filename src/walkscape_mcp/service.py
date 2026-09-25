@@ -464,22 +464,6 @@ class Service:
             since["reputation"][f] = {"value": float(value), **at}
         if points is not None:
             since["points"]["total"] = {"value": int(points), **at}
-        if carrying is not None:
-            keys = []
-            for spec in carrying:
-                try:
-                    iid, q = self._parse_item_spec(spec)
-                except KeyError as e:
-                    skipped.append(e.args[0])
-                    continue
-                # gear found in this same call counts as owned
-                keys_owned = {**{k: oi.id for k, oi in self._player.owned_gear.items()},
-                              **{k: k.partition("@")[0] for k in since["gear"]}}
-                owned = [k for k, i in keys_owned.items() if i == iid and (not q or k.endswith("@" + q.lower()))]
-                if not owned:
-                    skipped.append(f"You don't own {spec!r}")
-                keys += owned[:1]  # list an item twice to carry two copies (e.g. two of a ring)
-            since["carried"]["now"] = {"items": keys, **at}
         for spec in gear or []:
             try:
                 iid, q = self._parse_item_spec(spec)
@@ -508,6 +492,23 @@ class Service:
                 skipped.append(e.args[0])
                 continue
             since["items"][iid] = {"count": int(count), **at}
+        # after gear, so gear found in this same call can be carried
+        if carrying is not None:
+            keys = []
+            for spec in carrying:
+                try:
+                    iid, q = self._parse_item_spec(spec)
+                except KeyError as e:
+                    skipped.append(e.args[0])
+                    continue
+                # gear found in this same call counts as owned
+                keys_owned = {**{k: oi.id for k, oi in self._player.owned_gear.items()},
+                              **{k: k.partition("@")[0] for k in since["gear"]}}
+                owned = [k for k, i in keys_owned.items() if i == iid and (not q or k.endswith("@" + q.lower()))]
+                if not owned:
+                    skipped.append(f"You don't own {spec!r}")
+                keys += owned[:1]  # list an item twice to carry two copies (e.g. two of a ring)
+            since["carried"]["now"] = {"items": keys, **at}
 
     def _remember(self, info, skipped, completed, not_yet, notes, forget, unlocked, progress, not_unlocked) -> dict:
         met = info["history"]
