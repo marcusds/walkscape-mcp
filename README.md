@@ -66,6 +66,8 @@ The step and drop formulas are ported from the official planner's optimiser work
 - Crafting services: bonuses and requirements from the wiki's Services page count like gear, so recipes are evaluated at each location with a fitting service. Advanced services are assumed to cover basic recipes too.
 - Crafted quality: quality outcome = levels above the recipe's + gear, consumable and service quality outcome, run through the wiki's band/weight formula with its standard weights (the game data has no per-recipe weights). Fine materials move each roll up one quality.
 - Hidden activities (e.g. Summer cave foraging after Spring bat tracking) are checked against remembered action history and flagged or skipped.
+- Level-scaled loot: rows with a level requirement (most fish) are absent below it and grow linearly to full weight between their min and max scaling levels, rounded to 0.1 while scaling; fish XP bonuses add to XP per step. Fitted to the wiki's per-level fishing tables.
+- Skill-type requirements ("55% towards maximum Gathering level"): levels gained above 1 across that type's skills, over 98 per skill.
 
 The optimizer builds a loadout greedily, then hill-climbs one slot at a time, including the pet and consumable. It also seeds each set bonus so multi-piece sets get a fair trial.
 
@@ -73,8 +75,8 @@ Afterwards, any slot the objective left empty is filled with gear that adds side
 
 ### Not modelled
 
-- Level-scaled loot weights for fishing.
-- A few rare requirement types (`skillTypeLevel`, `inputKeywordWithLevel`). These are assumed satisfied and reported in `notes`.
+- The cost of activity inputs (arrows, traps, plants, bait). Activities that use them up list what they need and what you have, but the steps to get more aren't counted.
+- `distinctKeywordItemInInventory` (e.g. arrows in the inventory for a bow bonus) is assumed satisfied and reported in `notes`.
 
 ## Keeping it up to date
 

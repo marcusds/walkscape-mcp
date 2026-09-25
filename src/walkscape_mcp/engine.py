@@ -37,10 +37,10 @@ HANDLED_REQUIREMENT_TYPES = {
     "totalSkillLevel", "totalSkillLevelUps", "activityType", "traveling", "gameData", "itemAnywhere",
     "itemAnywhereWithYou", "collectiblesOwned", "totalWealth", "historyData", "exploreRealm",
     "distinctKeywordItemsEquipped", "keywordEquipped", "itemEquipped", "abilityAvailable", "keywordWithLevelEquipped",
-    "service",
+    "service", "skillTypeLevel", "inputKeywordWithLevel",
 }
 # Known but deliberately approximated (assumed satisfied and reported in notes)
-APPROXIMATED_REQUIREMENT_TYPES = {"skillTypeLevel", "inputKeywordWithLevel", "distinctKeywordItemInInventory"}
+APPROXIMATED_REQUIREMENT_TYPES = {"distinctKeywordItemInInventory"}
 HANDLED_STAT_TYPES = {
     "workEfficiency", "doubleRewards", "chestFind", "fineMaterialFind", "doubleAction", "noMaterialsConsumed",
     "qualityOutcome", "bonusExperience", "rollSpecialTable", "stepsRequired", "findCollectibles", "findBirdNests",
@@ -206,11 +206,33 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
                 for _, it in eq.gear)
         case "service":
             ok = False
+        case "skillTypeLevel":
+            ok = skill_type_progress(ctx.gd, ctx.skill_levels, q.get("type")) >= q.get("relativeLevel", 0) - 1e-9
+        case "inputKeywordWithLevel":
+            # only meaningful for a specific input item; see input_fits
+            ok = True
         case _:
             # skillTypeLevel, inputKeywordWithLevel, distinctKeywordItemInInventory, ... not modelled
             ctx.unverified.add(t)
             ok = ctx.assume_unknown_true
     return not ok if r.get("opposite") else ok
+
+
+def skill_type_progress(gd: GameData, skill_levels: dict[str, int], skill_type: str | None) -> float:
+    """Share of the way to max level across a skill type (gathering, artisan, utility): levels gained above 1
+    over 98 per skill. The wiki shows e.g. "55% towards maximum Gathering level [270]" (0.55 × 98 × 5 skills)."""
+    skills = [s for s in gd.skills if gd.skill_type(s) == skill_type]
+    if not skills:
+        return 0.0
+    return sum(max(0, skill_levels.get(s, 1) - 1) for s in skills) / (98 * len(skills))
+
+
+def input_fits(gd: GameData, item_id: str, req: dict) -> bool:
+    """inputKeywordWithLevel: the input item (e.g. arrows) must be for at least this level of the skill."""
+    q = req.get("requirement") or {}
+    lvl = max([r["requirement"].get("level", 0) for r in gd.items.get(item_id, {}).get("requirements") or []
+               if r["type"] == "skillLevel" and r["requirement"].get("skill") == q.get("skill")] or [0])
+    return lvl >= q.get("level", 0)
 
 
 def check_all(reqs, ctx: Context, eq: Equipped | None) -> bool:
@@ -408,7 +430,29 @@ def compute_metrics(stats: dict[str, float], activity: dict, main_skill: str | N
     }
 
 
-def table_drops(gd: GameData, activity: dict, stats: dict[str, float]) -> list[dict]:
+def row_weight(row: dict, skill_levels: dict[str, int] | None) -> float:
+    """A loot row's weight at the character's levels. Rows with level bonuses (fish, mostly) are absent below their
+    level requirement and, with linear scaling, grow from levelMinScaling to full weight at levelMaxScaling:
+    weight × max(minWeightScale, min(1, (level - min + 1) / (max - min + 1))), rounded to 0.1 while scaling.
+    Fitted to the wiki's per-level fishing tables (exact for Sea fishing (Rod) and Lake fishing except at level 10,
+    where the wiki's own table disagrees with its other levels). Without a character (skill_levels None) rows get full weight."""
+    w = row.get("rowWeight", 0)
+    if skill_levels is None:
+        return w
+    for b in row.get("requirementsBonuses") or []:
+        lvl = skill_levels.get(b.get("relatedSkill"), 1)
+        if lvl < b.get("levelRequirement", 0):
+            return 0.0
+        lo, hi = b.get("levelMinScaling", 0), b.get("levelMaxScaling", 0)
+        if row.get("linearWeightScaling") and hi >= lo:
+            scale = max(row.get("minWeightScale", 0), min(1.0, (lvl - lo + 1) / (hi - lo + 1)))
+            if scale < 1:  # partly scaled weights are rounded to 0.1; tiny full weights (trinkets) are not
+                w = round(w * scale, 1)
+    return w
+
+
+def table_drops(gd: GameData, activity: dict, stats: dict[str, float],
+                skill_levels: dict[str, int] | None = None) -> list[dict]:
     """Expected drops per reward roll for each item in the activity's loot tables."""
     out = []
     fine_chance = BASE_FINE_CHANCE * (1 + stats.get("fineMaterialFind", 0.0))
@@ -423,13 +467,14 @@ def table_drops(gd: GameData, activity: dict, stats: dict[str, float]) -> list[d
             if not t:
                 continue
             rows = [r for r in t["tableRows"]]
-            total_w = sum(r.get("rowWeight", 0) for r in rows) or 1
+            weights = [row_weight(r, skill_levels) for r in rows]
+            total_w = sum(weights) or 1
             hit = min(1.0, (1 - t.get("noDropChance", 0)) * mult)
-            for r in rows:
+            for r, w in zip(rows, weights, strict=True):
                 item_id = r.get("rowItemID") or ("coins" if r.get("isMoney") else None)
-                if not item_id:
+                if not item_id or not w:
                     continue
-                p = hit * r.get("rowWeight", 0) / total_w
+                p = hit * w / total_w
                 qty = (r.get("rowMinimumAmount", 1) + r.get("rowMaximumAmount", 1)) / 2
                 can_fine = grp.get("isPrimary") and (gd.items.get(item_id) or {}).get("canBeFine")
                 out.append({
@@ -438,6 +483,9 @@ def table_drops(gd: GameData, activity: dict, stats: dict[str, float]) -> list[d
                     "per_roll": p * rolls * qty,
                     "fine_per_roll": p * rolls * qty * fine_chance if can_fine else 0.0,
                     "modifier": mod_stat,
+                    # extra XP for catching this row (e.g. fish above the activity's base)
+                    "xp_bonus": {b["relatedSkill"]: b["xpBonus"] for b in r.get("requirementsBonuses") or []
+                                 if b.get("xpBonus")},
                 })
     return out
 
@@ -497,7 +545,12 @@ def evaluate(ctx: Context, lo: Loadout, statics: list[Source] | None = None, det
 
     stats = aggregate(active_attrs)
     metrics = compute_metrics(stats, ctx.activity, ctx.main_skill)
-    drops = table_drops(gd, ctx.activity, stats)
+    drops = table_drops(gd, ctx.activity, stats, ctx.skill_levels)
+    # per-row XP bonuses (fish) add to the activity's XP per completion, scaled like other XP
+    for d in drops:
+        for skill, bonus in d["xp_bonus"].items():
+            extra = d["chance_per_roll"] * (1 + metrics["double_rewards"]) * bonus * (1 + stats.get("bonusExperience", 0))
+            metrics["xp_per_step"][skill] = metrics["xp_per_step"].get(skill, 0) + extra / metrics["steps_per_action"]
     special = special_drops(gd, active_attrs)
 
     # recipes' service requirements are assumed met (you choose where to craft)

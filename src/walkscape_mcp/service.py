@@ -26,6 +26,7 @@ from .engine import (
     evaluate,
     gear_source,
     history_key,
+    input_fits,
     slot_type,
 )
 from .gamedata import (
@@ -676,6 +677,7 @@ class Service:
             "base_steps": a.get("workRequired"), "max_work_efficiency": a.get("maxWorkEfficiency"),
             "min_steps": base.metrics["min_possible_steps_per_completion"],
             "base_xp": a.get("xpRewardsMap"),
+            **({"inputs_used_each_action": inp} if (inp := self._activity_inputs(aid)) else {}),
             **({"visibility": {"status": v[0], "unlocks_after": v[1]}}
                if (v := self._visibility(pctx))[0] != "visible" else {}),
             "base_drops_no_gear": [{k: v for k, v in r.items() if k != "id"} for r in drop_report(base)],
@@ -905,8 +907,31 @@ class Service:
                        < r["requirement"].get("value", 0)]
         return ("assumed", labels) if unconfirmed else ("visible", labels)
 
+    def _activity_inputs(self, aid: str) -> list[str]:
+        """What an activity uses up each action (arrows, traps, plants...) and what the character has of it."""
+        gd, out = self.gd, []
+        for opt in gd.activity_like(aid).get("options") or []:
+            for inp in opt.get("inputs") or []:
+                if inp.get("type") == "specific":
+                    ids, need = [inp["item"]], f"{inp.get('quantity', 1)}x {gd.name(inp['item'])}"
+                else:
+                    kw = inp.get("keyword")
+                    ids = [k for k, i in gd.items.items() if kw in (i.get("keywords") or [])]
+                    need = f"one {kw.replace('_', ' ')} item"
+                reqs = inp.get("requirements") or []
+                ids = [i for i in ids if all(input_fits(gd, i, r) for r in reqs if r["type"] == "inputKeywordWithLevel")]
+                if reqs:
+                    need += f" ({'; '.join(describe_requirement(r) for r in reqs)})"
+                if self._player:
+                    have = [f"{gd.name(i)} ({self._have(i)})" for i in ids if sum(self._player.item_counts.get(i, (0, 0)))]
+                    need += f"; you have: {', '.join(have) if have else 'none'}"
+                out.append(need)
+        return out
+
     def _context_notes(self, ctx: Context) -> list[str]:
         notes = []
+        if inputs := self._activity_inputs(ctx.activity_id):
+            notes.append(f"Uses up each action (not counted in steps): {' | '.join(inputs)}.")
         status, unlock = self._visibility(ctx)
         if status == "hidden":
             notes.append(f"HIDDEN ACTIVITY: not visible in-game until {'; '.join(unlock)}.")

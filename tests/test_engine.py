@@ -100,3 +100,43 @@ def test_history_requirement(gd):
     assert check_requirement(r, met, None) and not met.assumed_history
     not_met = Context(gd, "mine_gold_ore", None, {}, history_not_met={key: 50})
     assert not check_requirement(r, not_met, None) and not not_met.assumed_history
+
+
+def test_fishing_rows_scale_with_level(gd):
+    from walkscape_mcp.engine import row_weight
+
+    rows = gd.loot_tables["lake_fishing_jarvonia"]["tableRows"]
+
+    def shares(level):
+        w = [row_weight(r, {"fishing": level}) for r in rows]
+        return [round(x / sum(w) * 100, 3) for x in w]
+
+    # carp, pike, trout per the wiki's Lake fishing table
+    assert shares(5) == [100.0, 0.0, 0.0]
+    assert shares(11) == [80.851, 19.149, 0.0]
+    assert shares(15) == [68.571, 31.429, 0.0]
+    assert shares(20) == [51.282, 42.735, 5.983]
+    assert shares(29) == [33.708, 28.09, 38.202]
+    assert shares(30) == [32.432, 27.027, 40.541]
+    net = {r["rowItemID"]: r for r in gd.loot_tables["sea_fishing_jarvonia_net"]["tableRows"]}
+    assert row_weight(net["pink_pearl_trinket"], {"fishing": 30}) == 0.03  # full weight, not rounded away
+    assert row_weight(net["raw_jellyfish"], {"fishing": 29}) == 0  # below its level requirement
+
+
+def test_skill_type_level_matches_wiki_thresholds(gd):
+    from walkscape_mcp.engine import skill_type_progress
+
+    gathering = [s for s in gd.skills if gd.skill_type(s) == "gathering"]
+    # the wiki shows Elderhide tunic needing "55% towards maximum Gathering level [270]"
+    levels = {s: 1 for s in gd.skills} | {gathering[0]: 99, gathering[1]: 99, gathering[2]: 75}
+    assert sum(v - 1 for s, v in levels.items() if s in gathering) == 270
+    assert skill_type_progress(gd, levels, "gathering") >= 0.55
+    levels[gathering[2]] = 74
+    assert skill_type_progress(gd, levels, "gathering") < 0.55
+
+
+def test_activity_inputs_are_reported(svc):
+    inputs = svc.activity_info("Alligator hunting")["inputs_used_each_action"]
+    assert inputs[0].startswith("one arrows item (input for hunting lvl 30+)")
+    notes = svc.activity_info("Repair the bank")["inputs_used_each_action"]
+    assert notes[0].startswith("50x Ectoplasm")

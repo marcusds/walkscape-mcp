@@ -275,6 +275,10 @@ def describe_requirement(r: dict) -> str:
             s = f"{q.get('data') or q.get('category')} completed {q.get('value', 1)}+ times"
         case "abilityAvailable":
             s = f"gear with the {q.get('ability')} ability"
+        case "skillTypeLevel":
+            s = f"{round(q.get('relativeLevel', 0) * 100)}% of the way to max level across {q.get('type')} skills"
+        case "inputKeywordWithLevel":
+            s = f"input for {q.get('skill')} lvl {q.get('level')}+"
         case _:
             s = f"{t} {q}"
     return neg + s
