@@ -23,6 +23,7 @@ OBJECTIVES = {
     "chests": "minimize steps per chest (any chest table)",
     "gems": "minimize steps per gem",
     "collectibles": "minimize steps per collectible drop",
+    "items": "minimize steps until you have every quantity in `targets` (several items farmed at once)",
 }
 
 
@@ -30,6 +31,7 @@ OBJECTIVES = {
 class Objective:
     kind: str
     target: str | None = None
+    targets: dict[str, int] | None = None  # "items": item id -> how many
 
     def value(self, ev: Evaluation) -> float:
         """Lower is better."""
@@ -39,6 +41,8 @@ class Objective:
                 return steps_per_item(ev, self.target)
             case "fine_item":
                 return steps_per_item(ev, self.target, fine=True)
+            case "items":  # drops roll together, so the slowest item decides when you're done
+                return max(n * steps_per_item(ev, iid) for iid, n in self.targets.items())
             case "xp":
                 v = m["xp_per_step"].get(self.target or m["main_skill"], 0)
                 return 1 / v if v > 0 else math.inf
@@ -63,6 +67,8 @@ class Objective:
         match self.kind:
             case "xp" | "total_xp":
                 return f"{1 / v:.4f} XP/step"
+            case "items":
+                return f"{v:,.0f} steps to get all of them"
             case _:
                 return f"{v:,.1f} steps per unit"
 

@@ -22,7 +22,7 @@ from .engine import (
 from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, norm, strip_markup
 from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
 from .paths import player_file, player_info_file, snapshot_dir
-from .player import OwnedItem, Player, parse_save, with_updates
+from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
@@ -33,6 +33,8 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 # a service's kind comes from its id/icon (e.g. "sawmill_halfling.png"); recipes require a kind and a tier
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
+STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
+NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
@@ -176,7 +178,7 @@ class Service:
             data = {}
         info = {"history": data.get("history") or {}, "notes": data.get("notes") or [],
                 "achievements": data.get("achievements") or {}, "goals": data.get("goals") or [],
-                "explored": data.get("explored") or [],
+                "explored": data.get("explored") or [], "location": data.get("location"),
                 "since_save": {k: (data.get("since_save") or {}).get(k) or {} for k in ("gear", "skills", "items")}}
         for n in list(info["notes"]):
             if m := ACHIEVEMENT_NOTE.fullmatch(n):
@@ -316,10 +318,16 @@ class Service:
                              achievements_not_unlocked: list[str] | None = None,
                              gear_found: list[str] | None = None, skill_levels: dict[str, int] | None = None,
                              item_counts: dict[str, int] | None = None, goals: list[str] | None = None,
-                             goals_done: list[str] | None = None, regions_explored: list[str] | None = None) -> dict:
+                             goals_done: list[str] | None = None, regions_explored: list[str] | None = None,
+                             location: str | None = None) -> dict:
         with self._info_lock():
             info = self._info()
             skipped: list[str] = []  # one unusable entry shouldn't discard the rest of the call
+            if location:
+                try:
+                    info["location"] = self.gd.resolve(location, "location")
+                except KeyError as e:
+                    skipped.append(e.args[0])
             self._remember_since_save(info, gear_found, skill_levels, item_counts, skipped)
             for g in goals_done or []:
                 info["goals"] = [x for x in info["goals"] if g.lower() not in x.lower()]
@@ -434,6 +442,8 @@ class Service:
         out["achievements_in_progress"] = {a: f"{v['progress']} (as of {v.get('updated', '?')})"
                                            for a, v in sorted(ach.items()) if v.get("progress") and not v.get("unlocked")}
         out["goals"] = info.get("goals") or []
+        if info.get("location") in self.gd.locations:
+            out["current_location"] = self.gd.locations[info["location"]]["name"]
         if info.get("explored"):
             out["regions_explored"] = [self._realms().get(r, r) for r in info["explored"]]
         since = info.get("since_save") or {}
@@ -689,10 +699,14 @@ class Service:
             locked[slot] = oi
         return start, locked
 
-    def _objective(self, objective: str, target: str | None) -> Objective:
+    def _objective(self, objective: str, target: str | None, targets: dict[str, int] | None = None) -> Objective:
         objective = objective.strip().lower()
         if objective not in OBJECTIVES:
             raise ValueError(f"Unknown objective {objective!r}. Options: {OBJECTIVES}")
+        if objective == "items":
+            if not targets:
+                raise ValueError("objective 'items' needs targets, e.g. {\"Flax\": 50, \"Honeycomb\": 59}")
+            return Objective("items", targets={self.gd.resolve(k, "item"): int(v) for k, v in targets.items()})
         if objective in ("item", "fine_item"):
             if not target:
                 raise ValueError("objective 'item' needs a target item name")
@@ -780,10 +794,10 @@ class Service:
     def optimize_loadout(self, activity: str, objective: str, target: str | None = None, location: str | None = None,
                          pet: str | None = "current", consumable: str | None = "none", require_items: list[str] | None = None,
                          exclude_items: list[str] | None = None, owned_only: bool = True,
-                         show_missing_upgrades: bool = True) -> dict:
+                         show_missing_upgrades: bool = True, targets: dict[str, int] | None = None) -> dict:
         gd = self.gd
         _, aid = self._resolve_any(activity, ["activity", "recipe"])
-        obj = self._objective(objective, target)
+        obj = self._objective(objective, target, targets)
         pets = self._pet_options(pet)
         consumables = self._consumable_options(consumable)
         exclude = {gd.resolve(x, "item") for x in exclude_items or []}
@@ -808,7 +822,8 @@ class Service:
         out: dict = {
             "activity": ctx.activity["name"],
             "location": gd.locations[loc]["name"] if loc else None,
-            "objective": f"{obj.kind}" + (f" ({gd.name(obj.target) if obj.kind in ('item', 'fine_item') else obj.target})" if obj.target else ""),
+            "objective": f"{obj.kind}" + (f" ({gd.name(obj.target) if obj.kind in ('item', 'fine_item') else obj.target})" if obj.target else "")
+                         + (f" ({', '.join(f'{n} {gd.name(i)}' for i, n in obj.targets.items())})" if obj.targets else ""),
             "result": obj.describe(score[1]),
             "valid": ev.valid,
             "unmet_activity_requirements": ev.unmet_activity_requirements,
@@ -898,6 +913,13 @@ class Service:
             reqs.append(text)
         return f"{name}: {'; '.join(reqs)}" if reqs else name
 
+    def _near(self, near: str | None) -> str | None:
+        """Location id to measure travel from: the one given, else the remembered current location."""
+        if near:
+            return self.gd.resolve(near, "location")
+        loc = self._info().get("location")
+        return loc if loc in self.gd.locations else None
+
     def _service(self, sid: str) -> dict:
         sv = next((x for x in self.gd.snap.get("services_list") or [] if x["id"] == sid), {"id": sid, "name": sid})
         text = f"{sid} {sv.get('icon', '')}"
@@ -924,9 +946,11 @@ class Service:
                     heapq.heappush(pq, (dist[v], v))
         return dist, prev
 
-    def find_services(self, service: str, near: str, top: int = 5) -> dict:
+    def find_services(self, service: str, near: str | None = None, top: int = 5) -> dict:
         gd = self.gd
-        src = gd.resolve(near, "location")
+        src = self._near(near)
+        if src is None:
+            raise ValueError("Where is the player? Pass near, or remember their location with remember_player_info.")
         q = norm(service)
         known = [self._service(x["id"]) for x in gd.snap.get("services_list") or []]
         wanted = {sv["id"]: sv for sv in known if sv["kind"] == q or q in norm(sv["name"])}
@@ -964,10 +988,13 @@ class Service:
             "note": "base_steps is route distance before travel gear; call plan_route for the trip with optimized gear.",
         }
 
-    def plan_route(self, start: str, destination: str, via: list[str] | None = None, avoid: list[str] | None = None,
-                   pet: str | None = "auto", owned_only: bool = True) -> dict:
+    def plan_route(self, destination: str, start: str | None = None, via: list[str] | None = None,
+                   avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True) -> dict:
         gd = self.gd
-        stops = [gd.resolve(x, "location") for x in [start, *(via or []), destination]]
+        src = self._near(start)
+        if src is None:
+            raise ValueError("Where is the player? Pass start, or remember their location with remember_player_info.")
+        stops = [src, *(gd.resolve(x, "location") for x in [*(via or []), destination])]
         avoided = {gd.resolve(x, "location") for x in avoid or []}
         graph = self._route_graph()
         if owned_only and not self._player:
@@ -1122,16 +1149,26 @@ class Service:
             "note": "Uses Perfect quality for crafted items and only items your levels allow you to equip.",
         }
 
-    def rank_activities(self, target: str, top: int = 10, pet: str | None = "current", consumable: str | None = "none",
-                        owned_only: bool = True) -> dict:
-        """Which activity/location gives the target item in the fewest steps with your best owned loadout."""
+    def rank_activities(self, target: str | None = None, top: int = 10, pet: str | None = "current",
+                        consumable: str | None = "none", owned_only: bool = True,
+                        targets: dict[str, int] | None = None, near: str | None = None,
+                        quantity: int | None = None) -> dict:
+        """Which activity/location gives the target item(s) in the fewest steps with your best owned loadout,
+        optionally counting the trip there from `near` (default: the remembered current location)."""
         gd = self.gd
-        tid = gd.resolve(target, "item")
-        obj = Objective("item", tid)
+        if targets:
+            obj = self._objective("items", None, targets)
+            tids = list(obj.targets)
+        elif target:
+            tid = gd.resolve(target, "item")
+            obj, tids = Objective("item", tid), [tid]
+        else:
+            raise ValueError("Give a target item, or targets with quantities for several at once")
         pets = self._pet_options(pet)
         consumables = self._consumable_options(consumable)
-        special = any(s["kind"] == "gear_special" for s in gd.item_sources.get(tid, []))
-        acts = [s["id"] for s in gd.item_sources.get(tid, []) if s["kind"] == "activity"]
+        srcs = [x for t in tids for x in gd.item_sources.get(t, [])]
+        special = any(x["kind"] == "gear_special" for x in srcs)
+        acts = [x["id"] for x in srcs if x["kind"] == "activity"]
         if special:
             acts = list(gd.activities)
         pool = list(self._player.owned_gear.values()) if (owned_only and self._player) else all_gear_pool(gd)
@@ -1164,20 +1201,193 @@ class Service:
                 rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
             elif sc[0] and not special:
                 blocked.append((ctx, loc, evaluate(ctx, lo).unmet_activity_requirements))
-        rows.sort()
+        src = self._near(near)
+        dist = self._base_distances(src)[0] if src else {}
+        loc_id = {v["name"]: k for k, v in gd.locations.items()}
+        per_unit = "steps_to_get_all" if targets else "steps_per_item"
+
+        def row(v, a, l):
+            r = {"activity": a, "location": l, per_unit: round(v, 1)}
+            if src:
+                r["travel_steps"] = dist.get(loc_id.get(l), math.inf) if l else 0
+                if quantity or targets:
+                    r["total_steps"] = round(r["travel_steps"] + v * (quantity or 1))
+            return r
+
+        ranked = [row(*r) for r in rows]
+        if src and (quantity or targets):
+            ranked.sort(key=lambda r: r["total_steps"])
+        elif src and ranked:  # when a closer source pays off against the fastest one
+            best = ranked[0]
+            for r in ranked[1:]:
+                saved = best["travel_steps"] - r["travel_steps"]
+                slower = r[per_unit] - best[per_unit]
+                if saved > 0 and slower > 0:
+                    r["better_than_fastest_below"] = f"{saved / slower:,.0f} items"
         out = {
-            "target": gd.name(tid),
-            "ranking": [{"activity": a, "location": l, "steps_per_item": round(v, 1)} for v, a, l in rows[:top]],
+            "target": ", ".join(f"{n} {gd.name(i)}" for i, n in obj.targets.items()) if targets else gd.name(tids[0]),
+            "ranking": ranked[:top],
             "note": "Each row uses its own optimized loadout; use optimize_loadout on a row for the gear.",
         }
+        if src:
+            out["from"] = gd.locations[src]["name"]
+            out["note"] += (" travel_steps is base route distance from 'from' (plan_route has it with travel gear)"
+                            + ("; total_steps adds the farming." if quantity or targets else "."))
         if self._player:
-            out["you_have"] = self._have(tid)
+            out["you_have"] = {gd.name(t): self._have(t) for t in tids} if targets else self._have(tids[0])
         if blocked:
             out["blocked_sources"] = [{"activity": c.activity["name"], "location": gd.locations[l]["name"] if l else None,
                                        "unmet": u} for c, l, u in blocked[:10]]
         if not rows:
-            out["other_sources"] = [x for x in self._sources(tid, 10) if not x.startswith("activity:")]
+            out["other_sources"] = [x for t in tids for x in self._sources(t, 10) if not x.startswith("activity:")]
         return out
+
+    # ---------- planning ----------
+
+    def _best_loadout(self, aid: str, obj: Objective, location: str | None = None, pet: str | None = "auto"):
+        """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location."""
+        pool = list(self._player.owned_gear.values()) if self._player else all_gear_pool(self.gd)
+        pets = self._pet_options(pet)
+        best = None
+        for loc in self._locations_for(aid, location):
+            ctx = self._context(aid, loc)
+            start, locked = self._start_and_locks(ctx, [], bool(self._player), pets, [None])
+            lo, searcher = optimize(ctx, obj, pool, pets, [None], start=start, locked=locked)
+            sc = searcher.score(lo)
+            if best is None or sc < best[0]:
+                best = (sc, ctx, lo)
+        _, ctx, lo = best
+        return ctx, lo, evaluate(ctx, lo)
+
+    def plan_recipe(self, recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
+        gd = self.gd
+        _, rid = self._resolve_any(recipe, ["recipe"])
+        r = gd.recipes[rid]
+        out_item, out_n = next(iter((r.get("itemRewards") or {"?": 1}).items()))
+        ctx, lo, ev = self._best_loadout(rid, Objective("actions"))
+        m = ev.metrics
+        per_completion = out_n * (1 + m["double_rewards"])
+        completions = math.ceil(count / per_completion)
+        steps = round(completions * m["steps_per_action"])  # a double action is a free extra completion
+        materials, gather_total = [], 0
+        src = self._near(near)
+        for group in r.get("materials") or []:
+            opts = group["options"]
+            rows = []
+            for o in opts:
+                need = math.ceil(completions * o["amount"] * (1 - m["no_materials_consumed"]))
+                have = sum(self._player.item_counts.get(o["item"], (0, 0))) if self._player else 0
+                rows.append({"item": gd.name(o["item"]), "id": o["item"], "need": need, "have": have,
+                             "short": max(0, need - have)})
+            pick = next((x for x in rows if not x["short"]), rows[0])
+            if len(rows) > 1:
+                pick["alternatives"] = [x["item"] for x in rows if x is not pick]
+            if pick["short"]:
+                ranked = self.rank_activities(pick["id"], top=1, pet=pet, near=gd.locations[src]["name"] if src else None,
+                                              quantity=pick["short"])
+                if ranked["ranking"]:
+                    best = ranked["ranking"][0]
+                    farm = round(best["steps_per_item"] * pick["short"])
+                    pick["gather"] = {**best, "steps_for_shortfall": farm}
+                    gather_total += farm
+                else:
+                    pick["gather"] = {"other_sources": ranked.get("other_sources", [])}
+            del pick["id"]
+            materials.append(pick)
+        out = {
+            "recipe": r["name"], "makes": f"{count} {gd.name(out_item)}",
+            "completions": completions, "crafting_steps": steps, "materials": materials,
+            "steps_gathering_shortfall": gather_total, "total_steps": steps + gather_total,
+            "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
+            "planner_link": gearset.encode_link(gd, lo, rid),
+            "metrics": {k: m[k] for k in ("steps_per_completion", "double_action", "double_rewards",
+                                         "no_materials_consumed")},
+        }
+        svc = next((q["requirement"] for q in r.get("requirements") or [] if q["type"] == "service"), None)
+        if svc and src:
+            kinds = [self._service(x["id"]) for x in gd.snap.get("services_list") or []]
+            ok = {sv["id"] for sv in kinds if sv["kind"] == svc.get("serviceKeyword")
+                  and (svc.get("tier") != "advanced" or sv["tier"] == "advanced")}
+            dist = self._base_distances(src)[0]
+            here = sorted((dist.get(lid, math.inf), l["name"]) for lid, l in gd.locations.items()
+                          if ok & set(l.get("serviceList") or []))
+            if here:
+                out["nearest_service"] = {"service": f"{svc.get('serviceKeyword')} ({svc.get('tier')})",
+                                          "location": here[0][1], "base_steps": here[0][0]}
+        out["notes"] = ["Expected values: double rewards add output, double action halves steps per completion, "
+                        "'no materials consumed' saves ingredients.",
+                        "Gathering steps exclude travel; rank_activities/plan_route give the trips."]
+        return out
+
+    def steps_to_level(self, skill: str, level: int, activity: str | None = None, location: str | None = None,
+                       pet: str | None = "auto") -> dict:
+        gd, p = self.gd, self.player()
+        sk = norm(skill)
+        if sk not in gd.skills:
+            raise KeyError(f"No skill {skill!r}")
+        if not 2 <= level <= len(SKILL_XP):
+            raise ValueError(f"Level must be 2-{len(SKILL_XP)}")
+        have, need_total = p.skill_xp.get(sk, 0), SKILL_XP[level - 1]
+        out = {"skill": sk, "current_level": p.skill_levels.get(sk, 1), "target_level": level,
+               "xp_now": have, "xp_needed": max(0, need_total - have)}
+        if activity and out["xp_needed"]:
+            _, aid = self._resolve_any(activity, ["activity", "recipe"])
+            ctx, lo, ev = self._best_loadout(aid, Objective("xp", sk), location, pet)
+            xps = ev.metrics["xp_per_step"].get(sk, 0)
+            if xps <= 0:
+                raise ValueError(f"{ctx.activity['name']} gives no {sk} XP")
+            out.update({
+                "activity": ctx.activity["name"], "location": gd.locations[ctx.location_id]["name"] if ctx.location_id else None,
+                "xp_per_step": round(xps, 4), "steps": math.ceil(out["xp_needed"] / xps),
+                "completions": math.ceil(out["xp_needed"] / xps / ev.metrics["steps_per_action"]),
+                "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
+                "planner_link": gearset.encode_link(gd, lo, aid),
+            })
+            if ctx.is_recipe:
+                out["note"] = "For a recipe, completions is how many crafts; plan_recipe gives the materials."
+        return out
+
+    def inventory_fill(self, activity: str, free_slots: int, location: str | None = None,
+                       inventory: dict[str, int] | None = None, gear_set: str | None = None) -> dict:
+        """Steps until `free_slots` more inventory slots are used by the activity's drops."""
+        gd = self.gd
+        _, aid = self._resolve_any(activity, ["activity", "recipe"])
+        loc = self._locations_for(aid, location)[0]
+        ctx = self._context(aid, loc)
+        lo = gearset.decode(gd, gear_set)[0] if gear_set else player_loadout(self.player())
+        ev = evaluate(ctx, lo)
+        held = {gd.resolve(k, "item"): int(v) for k, v in (inventory or {}).items()}
+        drops = []
+        for d in drop_report(ev, 100):
+            item = gd.items.get(d["id"], {})
+            if item.get("type") in NO_INVENTORY_SLOT or not d["per_1000_steps"]:
+                continue
+            drops.append((d["id"], d["per_1000_steps"] / 1000, STACK_SIZE.get(item.get("type"), 10)))
+
+        def new_slots(iid: str, rate: float, stack: int, steps: float) -> int:
+            h = held.get(iid, 0)  # count whole expected items, so a 5% chest chance doesn't take a slot at once
+            return math.ceil((h + math.floor(rate * steps)) / stack) - math.ceil(h / stack)
+
+        def slots_used(steps: float) -> int:
+            return sum(new_slots(iid, rate, stack, steps) for iid, rate, stack in drops)
+
+        if not drops or slots_used(10 ** 8) < free_slots:
+            raise ValueError("This activity's drops never fill that many slots")
+        lo_s, hi_s = 0, 10 ** 8
+        while hi_s - lo_s > 1:
+            mid = (lo_s + hi_s) // 2
+            lo_s, hi_s = (lo_s, mid) if slots_used(mid) >= free_slots else (mid, hi_s)
+        steps = hi_s
+        return {
+            "activity": ctx.activity["name"], "location": gd.locations[loc]["name"] if loc else None,
+            "free_slots": free_slots, "steps_until_full": steps,
+            "at_that_point": [{"item": gd.name(iid), "gained": round(rate * steps, 1),
+                               "new_slots": new_slots(iid, rate, stack, steps)}
+                              for iid, rate, stack in sorted(drops, key=lambda x: -x[1]) if rate * steps >= 0.5],
+            "notes": ["Expected values with " + ("the given gear set" if gear_set else "the character's equipped gear") + ".",
+                      "Stacks: materials 25, consumables 20, everything else 10 (wiki); currencies and collectibles "
+                      "take no slot. Pass inventory with current counts so partly filled stacks are counted."],
+        }
 
     def decode_gear_set(self, gear_set: str) -> dict:
         gd = self.gd

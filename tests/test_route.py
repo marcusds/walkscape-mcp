@@ -13,7 +13,7 @@ def svc(gd, player, tmp_path, monkeypatch):
 
 
 def test_route_legs_connect_and_gear_beats_base_distance(svc):
-    out = svc.plan_route("Azurazera", "Everhaven")
+    out = svc.plan_route("Everhaven", start="Azurazera")
     legs = [l["leg"].split(" → ") for l in out["legs"]]
     assert legs[0][0] == "Azurazera" and legs[-1][1] == "Everhaven"
     assert all(a[1] == b[0] for a, b in zip(legs, legs[1:]))
@@ -25,11 +25,11 @@ def test_route_legs_connect_and_gear_beats_base_distance(svc):
 
 
 def test_route_via_and_gear_requirements(svc):
-    out = svc.plan_route("Granfiddich", "Granfiddich", via=["Kelp Forest"])
+    out = svc.plan_route("Granfiddich", start="Granfiddich", via=["Kelp Forest"])
     underwater = [l for l in out["legs"] if "requires" in l]
     assert underwater and all("diving_gear" in l["requires"][0] for l in underwater)
     with pytest.raises(ValueError, match="No usable route"):
-        svc.plan_route("Granfiddich", "Kelp Forest", avoid=["Granfiddich Shores", "Vastalume"])
+        svc.plan_route("Kelp Forest", start="Granfiddich", avoid=["Granfiddich Shores", "Vastalume"])
 
 
 def test_find_services_ranks_by_distance(svc):
