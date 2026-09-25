@@ -101,6 +101,7 @@ class SearchSpace:
     consumables: list[tuple[str, bool] | None]
     locked: dict[str, object] = field(default_factory=dict)  # slot -> OwnedItem | None | pet/consumable tuple
     pruned_count: int = 0
+    extras: dict[str, list[Candidate]] = field(default_factory=dict)  # equipable but irrelevant: for complete()
 
 
 def _banned_for(gd: GameData, keywords) -> frozenset[str]:
@@ -149,17 +150,20 @@ def build_space(
 
     useful_kw = _useful_keywords(ctx, equipable)
     cands: dict[str, list[Candidate]] = {}
+    extras: dict[str, list[Candidate]] = {}
     pruned = 0
     for oi in equipable:
         item = gd.items[oi.id]
         kws = frozenset(item.get("keywords") or [])
         could_help = any(a.get("stats") and check_all(a.get("requirements"), ctx, None) for a in gear_source(gd, oi).attrs)
+        st = item["gearType"]
+        cand = Candidate(oi, st, kws, _banned_for(gd, kws))
         if not could_help and not (kws & useful_kw):
             pruned += 1
+            extras.setdefault(st, []).append(cand)
             continue
-        st = item["gearType"]
-        cands.setdefault(st, []).append(Candidate(oi, st, kws, _banned_for(gd, kws)))
-    return SearchSpace(ctx, slots, cands, pets, consumables, dict(locked or {}), pruned)
+        cands.setdefault(st, []).append(cand)
+    return SearchSpace(ctx, slots, cands, pets, consumables, dict(locked or {}), pruned, extras)
 
 
 def _conflicts(space: SearchSpace, lo: Loadout, slot: str, cand: Candidate) -> bool:
@@ -351,6 +355,30 @@ class Searcher:
             if best is None:
                 return lo
             lo = best
+
+    def complete(self, lo: Loadout, prefer: Loadout | None = None) -> Loadout:
+        """Fill every slot still empty, so the loadout can be equipped exactly as given: first with what's already
+        worn there (prefer), then any owned piece, as long as the objective and side benefits get no worse."""
+        lo = lo.copy()
+        for slot in self.space.slots:
+            if lo.slots.get(slot) or slot in self.space.locked:
+                continue
+            st = slot_type(slot)
+            options = self.space.candidates.get(st, []) + self.space.extras.get(st, [])
+            worn = prefer.slots.get(slot) if prefer else None
+            options.sort(key=lambda c: c.oi != worn)
+            base_s, base_b = self.score(lo)[:2], self.side_benefits(lo)
+            for c in options:
+                if _conflicts(self.space, lo, slot, c):
+                    continue
+                cand = self.apply(lo, slot, c.oi)
+                if self.score(cand)[:2] > base_s:
+                    continue
+                if any(x < y - 1e-12 for x, y in zip(self.side_benefits(cand), base_b)):
+                    continue
+                lo = cand
+                break
+        return lo
 
     def set_seeds(self, lo: Loadout) -> list[Loadout]:
         """For each keyword set bonus, force in the pieces we own and let hill climbing sort out the rest."""

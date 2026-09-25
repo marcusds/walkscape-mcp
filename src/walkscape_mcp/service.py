@@ -806,6 +806,9 @@ class Service:
                 q = q.strip(" )")
         return self.gd.resolve(spec.strip(), "item"), q
 
+    def _worn(self) -> Loadout | None:
+        return player_loadout(self._player) if self._player else None
+
     def _pool(self, owned_only: bool = True, carried_only: bool = False) -> list[OwnedItem]:
         """Gear to optimize with: everything owned, only what's equipped or in the inventory (away from a bank),
         or every item in the game."""
@@ -1030,7 +1033,7 @@ class Service:
         results.sort(key=lambda r: r[0])
         score, loc, ctx, lo, searcher, start = results[0]
         bare = lo
-        lo = searcher.fill_empty(bare)
+        lo = searcher.complete(searcher.fill_empty(bare), self._worn())
         filled = [s for s, oi in lo.items() if not bare.slots.get(s)]
         ctx.assumed_history.clear()  # report only what the final and current loadouts depend on
         ev = evaluate(ctx, lo)
@@ -1237,7 +1240,8 @@ class Service:
                 static = [r for r in reqs if r["type"] not in GEAR_DEPENDENT_REQS]
                 gkey = (origin, tuple(m["id"] for m in self._leg_modifiers(route, origin)))
                 if check_all(static, ctx, None) and gkey not in gear_cache:
-                    gear_cache[gkey] = optimize(ctx, obj, pool, pets, [None])
+                    lo, se = optimize(ctx, obj, pool, pets, [None])
+                    gear_cache[gkey] = (se.complete(se.fill_empty(lo), self._worn()), se)
                 ev = evaluate(ctx, gear_cache[gkey][0], detail=False) if gkey in gear_cache else None
                 if ev is None or not ev.valid:
                     legs_cache[key] = None
@@ -1327,8 +1331,7 @@ class Service:
         if best_single:
             total, lo = best_single
             ctx = legs[0][5]
-            # fill free slots with side benefits (chests, tokens...) judged on the first leg
-            lo = next(se for lo2, se in gear_cache.values() if lo2 is lo).fill_empty(lo)
+            # candidates are already complete, with free slots holding side benefits (judged on their own leg)
             ev = evaluate(ctx, lo)
             out["single_loadout"] = {
                 "steps": total,
@@ -1488,7 +1491,7 @@ class Service:
             lo, searcher = optimize(ctx, obj, pool, pets, [None], start=start, locked=locked)
             sc = searcher.score(lo)
             if best is None or sc < best[0]:
-                best = (sc, ctx, lo)
+                best = (sc, ctx, searcher.complete(searcher.fill_empty(lo), self._worn()))
         _, ctx, lo = best
         ctx.assumed_history.clear()  # report only what the chosen loadout depends on
         return ctx, lo, evaluate(ctx, lo)

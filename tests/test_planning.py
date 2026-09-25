@@ -75,3 +75,15 @@ def test_hidden_activities_are_flagged_or_skipped(svc):
 
     svc.remember_player_info(completed=["Spring bat tracking"])
     assert "hidden_activity" not in svc.rank_activities("Bell pepper", fine=True)["ranking"][0]
+
+
+def test_loadouts_fill_every_slot(svc):
+    from walkscape_mcp.engine import SLOT_ORDER
+
+    tools = svc._player and svc._context("treasure_hunt", "horn_of_respite").tool_slots
+    slots = [s for s in SLOT_ORDER if not s.startswith("tool") or int(s[4:]) < tools]
+    out = svc.optimize_loadout("Treasure hunt", "item", "Adventurers' Guild token", pet="none",
+                               show_missing_upgrades=False)
+    owned_types = {svc.gd.items[oi.id]["gearType"] for oi in svc._player.owned_gear.values()}
+    expected = [s for s in slots if s.rstrip("0123456789") in owned_types]
+    assert len(out["loadout"]["slots"]) == len(expected)
