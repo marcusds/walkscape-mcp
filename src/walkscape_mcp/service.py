@@ -1403,7 +1403,7 @@ class Service:
             for r in ranked[1:]:
                 saved = best["travel_steps"] - r["travel_steps"]
                 slower = r[per_unit] - best[per_unit]
-                if saved > 0 and slower > 0:
+                if saved > 0 and slower > 0 and saved / slower >= 1:
                     r["better_than_fastest_below"] = f"{saved / slower:,.0f} items"
         out = {
             "target": ", ".join(f"{n} {gd.name(i)}" for i, n in obj.targets.items()) if targets
