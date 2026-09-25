@@ -1,6 +1,11 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from walkscape_mcp.service import Service
+
+SAVE = Path(__file__).parent / "fixtures" / "save.json"
 
 
 @pytest.fixture
@@ -9,6 +14,15 @@ def svc(gd, player, tmp_path, monkeypatch):
     svc = Service.__new__(Service)  # skip __init__: no snapshot reload or background refresh
     svc._gd, svc._player, svc._not_met = gd, player, {}
     svc._reload_snapshot = lambda: None
+    return svc
+
+
+@pytest.fixture
+def loading_svc(svc, tmp_path, monkeypatch):
+    """svc whose load_save works offline."""
+    monkeypatch.setattr("walkscape_mcp.service.player_file", lambda: tmp_path / "player.json")
+    svc._needs_refresh = lambda *a: False
+    svc._stamp_version = lambda v: None
     return svc
 
 
@@ -46,3 +60,90 @@ def test_forget_then_add_replaces_a_note(svc):
     svc.remember_player_info(notes=["Progress: honeycomb 20/100"])
     out = svc.remember_player_info(forget=["honeycomb"], notes=["Progress: honeycomb 33/100"])
     assert out["notes"] == ["Progress: honeycomb 33/100"]
+
+
+ACH = {name: {"difficulty": "normal", "points": 3, "requirements": "", "rewards": ""}
+       for name in ("Masterchef", "Winnie The Pooh", "Human Fish", "Wetlands Explorer")}
+
+
+@pytest.fixture
+def ach_svc(svc):
+    svc.achievement_list = lambda: ACH
+    return svc
+
+
+def test_achievements_survive_broad_forget(ach_svc):
+    ach_svc.remember_player_info(achievements_unlocked=["masterchef", "Wetlands explorer"],
+                                 achievement_progress={"Winnie the Pooh": "41/100"})
+    out = ach_svc.remember_player_info(forget=["achievement", "Winnie"])
+    assert out["achievements_unlocked"] == ["Masterchef", "Wetlands Explorer"]
+    assert list(out["achievements_in_progress"]) == ["Winnie The Pooh"]
+
+
+def test_unlocking_clears_progress_and_unknown_names_are_skipped(ach_svc):
+    ach_svc.remember_player_info(achievement_progress={"Winnie The Pooh": "41/100"})
+    out = ach_svc.remember_player_info(achievements_unlocked=["Winnie The Pooh", "Not An Achievement"])
+    assert out["achievements_unlocked"] == ["Winnie The Pooh"]
+    assert out["achievements_in_progress"] == {}
+    assert "Not An Achievement" in out["skipped"][0]
+    out = ach_svc.remember_player_info(achievements_not_unlocked=["Winnie The Pooh"])
+    assert out["achievements_unlocked"] == []
+
+
+def test_old_achievement_notes_are_migrated(ach_svc, tmp_path):
+    (tmp_path / "player_info.json").write_text(
+        '{"notes": ["Unlocked achievement: Human Fish", "Unlocked achievement: Masterchef (120 points)", "Other"]}')
+    out = ach_svc.remember_player_info()
+    assert out["achievements_unlocked"] == ["Human Fish", "Masterchef"]
+    assert out["notes"] == ["Other"]
+    rows = {r["name"]: r["status"] for r in ach_svc.achievements("all")["achievements"]}
+    assert rows == {"Masterchef": "unlocked", "Winnie The Pooh": "not recorded", "Human Fish": "unlocked",
+                    "Wetlands Explorer": "not recorded"}
+
+
+def test_wiki_achievement_page_parses(svc):
+    from walkscape_mcp.wiki import Wiki
+    svc.wiki = Wiki()
+    if not svc.wiki.state().get("path"):
+        pytest.skip("no wiki dump downloaded")
+    known = svc.achievement_list()
+    assert known["Winnie The Pooh"]["points"] == 3 and known["Winnie The Pooh"]["difficulty"] == "normal"
+    assert known["Tutorial Complete"]["points"] == 10
+    assert len(known) > 60
+
+
+def test_updates_since_save_feed_every_tool(svc):
+    assert "flippy_spatula@rare" not in svc._player.owned_gear
+    cooking = svc._player.skill_levels["cooking"]
+    out = svc.remember_player_info(gear_found=["Flippy spatula (rare)", "Berries"], skill_levels={"cooking": cooking + 3},
+                                   item_counts={"Berries": 586})
+    assert "Berries isn't gear" in out["skipped"][0]
+    assert out["since_last_save"] == ["Flippy spatula (rare)", f"cooking {cooking + 3}", "586 Berries"]
+    assert "flippy_spatula@rare" in svc._player.owned_gear
+    assert svc._player.skill_levels["cooking"] == cooking + 3
+    assert svc._player.item_counts["berries"][0] == 586
+    assert svc._context("brew_beer", None).skill_levels["cooking"] == cooking + 3
+
+
+def test_newer_save_drops_updates_it_covers(loading_svc):
+    svc = loading_svc
+    save = json.loads(SAVE.read_text())
+    svc.load_save(json.dumps(save))
+    svc.remember_player_info(gear_found=["Flippy spatula (rare)"], item_counts={"Berries": 586})
+    out = svc.load_save(json.dumps(save))  # same save again: nothing is covered yet
+    assert out["remembered_info"]["since_last_save"] == ["Flippy spatula (rare)", "586 Berries"]
+    save["steps"] += 1000
+    out = svc.load_save(json.dumps(save))
+    assert out["updates_now_in_save"] == ["Flippy spatula (rare)", "586 Berries"]
+    assert "since_last_save" not in out["remembered_info"]
+    assert "flippy_spatula@rare" not in svc._player.owned_gear
+
+
+def test_goals_and_explored_regions(svc):
+    out = svc.remember_player_info(goals=["190 points for Treasure hunter bandolier", "Cooking 46"],
+                                   regions_explored=["Wrentmark", "Atlantis"])
+    assert out["goals"] == ["190 points for Treasure hunter bandolier", "Cooking 46"]
+    assert out["regions_explored"] == ["Wrentmark"] and "Atlantis" in out["skipped"][0]
+    out = svc.remember_player_info(goals_done=["cooking"], forget=["points"])
+    assert out["goals"] == ["190 points for Treasure hunter bandolier"]
+    assert svc._context("brew_beer", None).explored == {"wrentmark"}

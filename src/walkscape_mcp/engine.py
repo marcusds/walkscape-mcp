@@ -74,6 +74,7 @@ class Context:
     # action history (not in the save): key -> threshold the user confirmed reaching / said they haven't reached
     history_met: dict[str, float] = field(default_factory=dict)
     history_not_met: dict[str, float] = field(default_factory=dict)
+    explored: set[str] = field(default_factory=set)  # regions the user said they've fully explored
     assume_unknown_true: bool = True
 
     def __post_init__(self):
@@ -99,8 +100,9 @@ class Context:
     @classmethod
     def for_player(cls, gd: GameData, player: Player | None, activity_id: str, location_id: str | None,
                    history_met: dict[str, float] | None = None,
-                   history_not_met: dict[str, float] | None = None) -> "Context":
-        hist = {"history_met": history_met or {}, "history_not_met": history_not_met or {}}
+                   history_not_met: dict[str, float] | None = None,
+                   explored: set[str] | None = None) -> "Context":
+        hist = {"history_met": history_met or {}, "history_not_met": history_not_met or {}, "explored": explored or set()}
         if player is None:
             return cls(gd, activity_id, location_id, skill_levels={s: 99 for s in gd.skills}, **hist)
         return cls(
@@ -185,7 +187,8 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
                 ctx.assumed_history.add((key, need))
                 ok = ctx.assume_unknown_true
         case "exploreRealm":
-            ok = q.get("realm") in ctx.reputation
+            # the save has no exploration data: use what the user told us, else having reputation there
+            ok = q.get("realm") in ctx.explored or q.get("realm") in ctx.reputation
         case "distinctKeywordItemsEquipped":
             ok = all(eq.keyword_counts.get(k, 0) >= q.get("quantity", 1) for k in q.get("keywords") or [])
         case "keywordEquipped":

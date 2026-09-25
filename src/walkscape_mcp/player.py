@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .gamedata import QUALITIES, GameData
 
@@ -169,3 +169,21 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         unknown_ids=sorted(set(unknown)),
         item_counts={k: (v[0], v[1]) for k, v in counts.items()},
     )
+
+
+def with_updates(gd: GameData, player: Player, since: dict) -> Player:
+    """Apply what the user reported after exporting the save: gear found, skill levels, item counts.
+    `since` is player_info's "since_save" section; entries the save already covers were pruned on load."""
+    owned, ids, xp, counts = dict(player.owned_gear), set(player.all_item_ids), dict(player.skill_xp), dict(player.item_counts)
+    for key in since.get("gear") or {}:
+        item_id, _, quality = key.partition("@")
+        if item_id in gd.items:
+            owned[key] = OwnedItem(item_id, quality)
+            ids.add(item_id)
+    for skill, e in (since.get("skills") or {}).items():
+        xp[skill] = max(xp.get(skill, 0), SKILL_XP[min(e["level"], len(SKILL_XP)) - 1])
+    for item_id, e in (since.get("items") or {}).items():
+        counts[item_id] = (e["count"], counts.get(item_id, (0, 0))[1])
+        if e["count"]:
+            ids.add(item_id)
+    return replace(player, owned_gear=owned, all_item_ids=ids, skill_xp=xp, item_counts=counts)

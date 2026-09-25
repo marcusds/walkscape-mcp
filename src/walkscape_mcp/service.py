@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
+import difflib
+import fcntl
 import json
 import math
+import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import gearset, sync
 from .engine import (
     GEAR_DEPENDENT_REQS, Context, Loadout, check_requirement, drop_report, evaluate, gear_source, history_key, slot_type,
 )
-from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, strip_markup
+from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, norm, strip_markup
 from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
 from .paths import player_file, player_info_file, snapshot_dir
-from .player import OwnedItem, Player, parse_save
+from .player import OwnedItem, Player, parse_save, with_updates
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
 STAMP_WINDOW = 24 * 3600  # a snapshot this fresh is assumed to match the loaded save's game version
 RANK_FULL_SEARCH = 40  # rank_activities runs the full search on at most this many (or 3x top) candidates
+ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
+ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?")  # pre-structured notes, migrated
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
@@ -95,11 +101,19 @@ class Service:
         f = player_file()
         if f.exists() and self._gd is not None:
             try:
-                self._player = parse_save(self._gd, f.read_text())
+                self._save = parse_save(self._gd, f.read_text())
             except Exception:
-                self._player = None
+                self._save = self._player = None
                 return
+            self._apply_updates()
             self._stamp_version(self._player.game_version)
+
+    def _apply_updates(self, info: dict | None = None):
+        """self._player = the save plus what the user reported since exporting it."""
+        if getattr(self, "_save", None) is None:
+            self._save = self._player
+        if self._save is not None:
+            self._player = with_updates(self.gd, self._save, (info or self._info())["since_save"])
 
     def _stamp_version(self, game_version: str):
         """A fresh snapshot without a recorded version matches the game the save came from."""
@@ -129,8 +143,16 @@ class Service:
         data = json.loads(text)
         player = parse_save(self.gd, data)
         player_file().write_text(json.dumps(data))
-        self._player = player
-        out = {**player.summary(self.gd), "remembered_info": self._describe_info(self._info())}
+        self._save = player
+        with self._info_lock():
+            info = self._info()
+            dropped = self._prune_since_save(info, player)
+            if dropped:
+                self._write_info(info)
+        self._apply_updates(info)
+        out = {**self._player.summary(self.gd), "remembered_info": self._describe_info(info)}
+        if dropped:
+            out["updates_now_in_save"] = dropped
         if not self.gd.meta.get("game_version"):
             self._stamp_version(player.game_version)
         elif self._needs_refresh(player.game_version):
@@ -147,11 +169,96 @@ class Service:
             data = json.loads(f.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}
-        return {"history": data.get("history") or {}, "notes": data.get("notes") or []}
+        info = {"history": data.get("history") or {}, "notes": data.get("notes") or [],
+                "achievements": data.get("achievements") or {}, "goals": data.get("goals") or [],
+                "explored": data.get("explored") or [],
+                "since_save": {k: (data.get("since_save") or {}).get(k) or {} for k in ("gear", "skills", "items")}}
+        for n in list(info["notes"]):
+            if m := ACHIEVEMENT_NOTE.fullmatch(n):
+                info["achievements"].setdefault(m["name"], {})["unlocked"] = True
+                info["notes"].remove(n)
+        return info
+
+    @contextmanager
+    def _info_lock(self):
+        """Several MCP server processes (one per client session) share player_info.json."""
+        with open(player_info_file().with_name("player_info.lock"), "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+
+    def _write_info(self, info: dict):
+        f = player_info_file()
+        tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(info, indent=1) + "\n")
+        tmp.replace(f)
+
+    def _prune_since_save(self, info: dict, save: Player) -> list[str]:
+        """Drop reported updates that a newer save now covers. Returns what was dropped."""
+        since, dropped = info["since_save"], []
+        levels = save.skill_levels
+        for section, covered in (
+            ("gear", lambda k, e: k in save.owned_gear),
+            ("skills", lambda k, e: levels.get(k, 0) >= e["level"]),
+            ("items", lambda k, e: False),
+        ):
+            for k, e in list(since[section].items()):
+                if covered(k, e) or e.get("at_steps", 0) < save.steps:
+                    del since[section][k]
+                    dropped.append(self._since_label(section, k, e))
+        return dropped
+
+    def _since_label(self, section: str, key: str, e: dict) -> str:
+        if section == "gear":
+            item_id, _, q = key.partition("@")
+            return f"{self.gd.name(item_id)} ({q})"
+        if section == "skills":
+            return f"{key} {e['level']}"
+        return f"{e['count']:,} {self.gd.name(key)}"
+
+    def _realms(self) -> dict[str, str]:
+        """Region id -> display name, for exploreRealm requirements."""
+        out = {}
+        for loc in self.gd.locations.values():
+            if f := loc.get("faction"):
+                out[f] = f.replace("_", " ").title()
+        return out
+
+    def achievement_list(self) -> dict[str, dict]:
+        """Every achievement on the wiki's Achievements page, by name. Empty if the wiki is unavailable."""
+        tag = self.wiki.state().get("tag")
+        if getattr(self, "_achievements_for", None) != tag or not getattr(self, "_achievements", None):
+            out, difficulty = {}, None
+            try:
+                self.wiki.update()
+                text = self.wiki.page("Achievements", 1_000_000)
+            except Exception:
+                return {}
+            for line in text.splitlines():
+                line = line.strip()
+                if m := re.fullmatch(r"(Easy|Normal|Hard|Extreme) Achievements", line):
+                    difficulty = m[1].lower()
+                elif m := ACHIEVEMENT_ROW.fullmatch(line):
+                    out[m["name"]] = {"difficulty": difficulty, "points": int(m["points"]),
+                                      "requirements": m["requirements"], "rewards": m["rewards"]}
+            self._achievements, self._achievements_for = out, tag
+        return self._achievements
+
+    def _resolve_achievement(self, name: str, known: dict[str, dict]) -> str:
+        if not known:  # no wiki: store the name as given
+            return name.strip()
+        by_lower = {k.lower(): k for k in known}
+        if hit := by_lower.get(name.strip().lower()):
+            return hit
+        close = difflib.get_close_matches(name.strip().lower(), by_lower, n=3, cutoff=0.6)
+        if len(close) == 1 or (close and difflib.SequenceMatcher(None, name.lower(), close[0]).ratio() >= 0.85):
+            return by_lower[close[0]]
+        raise KeyError(f"No achievement matching {name!r}. Close matches: {[by_lower[c] for c in close]}")
 
     def _context(self, activity_id: str, location_id: str | None) -> Context:
+        info = self._info()
         return Context.for_player(self.gd, self._player, activity_id, location_id,
-                                  history_met=self._info()["history"], history_not_met=self._not_met)
+                                  history_met=info["history"], history_not_met=self._not_met,
+                                  explored=set(info["explored"]))
 
     def _history_thresholds(self) -> dict[str, list[float]]:
         """Every action-history threshold in the game data, by key."""
@@ -198,8 +305,62 @@ class Service:
         return key, value if value is not None else pick(levels)
 
     def remember_player_info(self, completed: list[str] | None = None, not_yet: list[str] | None = None,
-                             notes: list[str] | None = None, forget: list[str] | None = None) -> dict:
-        info = self._info()
+                             notes: list[str] | None = None, forget: list[str] | None = None,
+                             achievements_unlocked: list[str] | None = None,
+                             achievement_progress: dict[str, str] | None = None,
+                             achievements_not_unlocked: list[str] | None = None,
+                             gear_found: list[str] | None = None, skill_levels: dict[str, int] | None = None,
+                             item_counts: dict[str, int] | None = None, goals: list[str] | None = None,
+                             goals_done: list[str] | None = None, regions_explored: list[str] | None = None) -> dict:
+        with self._info_lock():
+            info = self._info()
+            skipped: list[str] = []  # one unusable entry shouldn't discard the rest of the call
+            self._remember_since_save(info, gear_found, skill_levels, item_counts, skipped)
+            for g in goals_done or []:
+                info["goals"] = [x for x in info["goals"] if g.lower() not in x.lower()]
+            info["goals"] += [g for g in goals or [] if g not in info["goals"]]
+            for r in regions_explored or []:
+                realms = {norm(v): k for k, v in self._realms().items()} | {k: k for k in self._realms()}
+                if (rid := realms.get(norm(r))) is None:
+                    skipped.append(f"No region matching {r!r}. Regions: {sorted(self._realms().values())}")
+                elif rid not in info["explored"]:
+                    info["explored"].append(rid)
+            out = self._remember(info, skipped, completed, not_yet, notes, forget,
+                                 achievements_unlocked, achievement_progress, achievements_not_unlocked)
+        self._apply_updates(info)
+        return out
+
+    def _remember_since_save(self, info: dict, gear, skills, items, skipped: list[str]):
+        since, at = info["since_save"], {"at_steps": self._save.steps if getattr(self, "_save", None) else 0}
+        for spec in gear or []:
+            try:
+                iid, q = self._parse_item_spec(spec)
+            except KeyError as e:
+                skipped.append(e.args[0])
+                continue
+            item = self.gd.items[iid]
+            if not item.get("gearType"):
+                skipped.append(f"{item['name']} isn't gear; use item_counts for materials and consumables")
+                continue
+            q = (q or item.get("quality") or "common").lower()
+            if q not in QUALITIES:
+                skipped.append(f"Unknown quality {q!r} for {item['name']}")
+                continue
+            since["gear"][f"{iid}@{q}"] = at
+        for skill, level in (skills or {}).items():
+            if (sk := norm(skill)) not in self.gd.skills:
+                skipped.append(f"No skill {skill!r}")
+                continue
+            since["skills"][sk] = {"level": int(level), **at}
+        for name, count in (items or {}).items():
+            try:
+                iid = self.gd.resolve(name.removesuffix(" (fine)"), "item")
+            except KeyError as e:
+                skipped.append(e.args[0])
+                continue
+            since["items"][iid] = {"count": int(count), **at}
+
+    def _remember(self, info, skipped, completed, not_yet, notes, forget, unlocked, progress, not_unlocked) -> dict:
         met = info["history"]
         # forget first, so one call can replace a note or entry without deleting its replacement
         for x in forget or []:
@@ -207,8 +368,6 @@ class Service:
             for k in list(met):
                 if x.lower() in self._history_label(k, met[k]).lower():
                     del met[k]
-        skipped = []  # one unusable entry shouldn't discard the rest of the call
-
         def parse(entry, pick):
             try:
                 return self._parse_history(entry, pick)
@@ -233,7 +392,31 @@ class Service:
         for n in notes or []:
             if n not in info["notes"]:
                 info["notes"].append(n)
-        player_info_file().write_text(json.dumps(info, indent=1) + "\n")
+
+        # achievements live apart from notes, so a broad `forget` can't wipe them
+        known = self.achievement_list() if unlocked or progress or not_unlocked else {}
+        ach, today = info["achievements"], time.strftime("%Y-%m-%d")
+
+        def resolve(name):
+            try:
+                return self._resolve_achievement(name, known)
+            except KeyError as e:
+                skipped.append(e.args[0])
+
+        for name in not_unlocked or []:
+            if (a := resolve(name)) and a in ach:
+                ach[a].pop("unlocked", None)
+                ach[a]["updated"] = today
+        for name, value in (progress or {}).items():
+            if a := resolve(name):
+                ach.setdefault(a, {}).update(progress=str(value), updated=today)
+        for name in unlocked or []:
+            if a := resolve(name):
+                ach[a] = {"unlocked": True, "updated": today}
+        for a in [a for a, v in ach.items() if not v.get("unlocked") and not v.get("progress")]:
+            del ach[a]
+
+        self._write_info(info)
         out = self._describe_info(info)
         if skipped:
             out["skipped"] = skipped
@@ -241,6 +424,17 @@ class Service:
 
     def _describe_info(self, info: dict) -> dict:
         out = {"reached": [self._history_label(k, v) for k, v in info["history"].items()], "notes": info["notes"]}
+        ach = info.get("achievements") or {}
+        out["achievements_unlocked"] = sorted(a for a, v in ach.items() if v.get("unlocked"))
+        out["achievements_in_progress"] = {a: f"{v['progress']} (as of {v.get('updated', '?')})"
+                                           for a, v in sorted(ach.items()) if v.get("progress") and not v.get("unlocked")}
+        out["goals"] = info.get("goals") or []
+        if info.get("explored"):
+            out["regions_explored"] = [self._realms().get(r, r) for r in info["explored"]]
+        since = info.get("since_save") or {}
+        if any(since.values()):
+            out["since_last_save"] = [self._since_label(sec, k, e) for sec in ("gear", "skills", "items")
+                                      for k, e in (since.get(sec) or {}).items()]
         if self._not_met:
             out["not_yet_this_session"] = [self._history_label(k, v) for k, v in self._not_met.items()]
         return out
@@ -253,6 +447,31 @@ class Service:
 
     def player_summary(self) -> dict:
         return {**self.player().summary(self.gd), "remembered_info": self._describe_info(self._info())}
+
+    def achievements(self, show: str = "not_unlocked") -> dict:
+        """Wiki achievement list merged with what the user has told us."""
+        known = self.achievement_list()
+        if not known:
+            raise RuntimeError("Couldn't read the wiki's Achievements page.")
+        ach = self._info()["achievements"]
+        rows = []
+        for name, a in known.items():
+            mine = ach.get(name, {})
+            status = "unlocked" if mine.get("unlocked") else "in progress" if mine.get("progress") else "not recorded"
+            if show == "all" or (show == "unlocked") == (status == "unlocked"):
+                rows.append({"name": name, **a, "status": status, **({"progress": mine["progress"]}
+                                                                      if mine.get("progress") else {})})
+        recorded = sum(known[a]["points"] for a, v in ach.items() if v.get("unlocked") and a in known)
+        out = {"achievements": rows, "recorded_unlocked_points": recorded}
+        if self._player:
+            out["save_achievement_points"] = self._player.achievement_points
+            if recorded < self._player.achievement_points:
+                out["note"] = ("The save has more points than the recorded unlocks add up to, so some unlocked "
+                               "achievements aren't recorded yet. 'not recorded' may still be unlocked; ask the user.")
+        unmatched = sorted(a for a in ach if a not in known)
+        if unmatched:
+            out["recorded_but_not_on_wiki"] = unmatched
+        return out
 
     # ---------- lookups ----------
 
