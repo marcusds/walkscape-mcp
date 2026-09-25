@@ -19,7 +19,8 @@ Workflow:
 3. For "best loadout for X" requests call optimize_loadout. Map the user's goal to an objective:
 {chr(10).join(f"   - {k}: {v}" for k, v in OBJECTIVES.items())}
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
-4. For "where should I farm X" call rank_activities. For "how do I get to X" / travel gear, call plan_route.
+4. For "where should I farm X" call rank_activities. For "how do I get to X" / travel gear, call plan_route;
+   for "nearest sawmill/kitchen/...", find_services. Recipes needing a service are done at any location with it.
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
 6. When the user mentions something about their character that the save export doesn't contain (how many times
    they've done an activity, travel steps, achievements, quests, unlocks), call remember_player_info so it persists.
@@ -213,6 +214,15 @@ def plan_route(start: str, destination: str, via: list[str] | None = None, avoid
     Returns each leg with base and optimized steps, the gear whenever it changes (with planner_link), and the best
     single loadout for the whole trip (planner_link and gear_set_export) for users who don't want to swap."""
     return s().plan_route(start, destination, via, avoid, pet, owned_only)
+
+
+@mcp.tool()
+def find_services(service: str, near: str, top: int = 5) -> dict:
+    """Nearest locations with a service (sawmill, kitchen, forge, loom, workshop, trinketry bench, mailbox,
+    wardrobe...) or a named one ("Cursed forge"), ranked by base travel steps from `near`. Each row lists the
+    services there (with tier; recipes need basic or advanced), the route, and terrain the route requires.
+    Legs blocked by permits or levels are avoided."""
+    return s().find_services(service, near, top)
 
 
 @mcp.tool()

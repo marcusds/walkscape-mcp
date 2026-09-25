@@ -30,6 +30,9 @@ STAMP_WINDOW = 24 * 3600  # a snapshot this fresh is assumed to match the loaded
 RANK_FULL_SEARCH = 40  # rank_activities runs the full search on at most this many (or 3x top) candidates
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?")  # pre-structured notes, migrated
+# a service's kind comes from its id/icon (e.g. "sawmill_halfling.png"); recipes require a kind and a tier
+SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
+                 "mysterious_merchant")
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
@@ -894,6 +897,72 @@ class Service:
                     text = text.replace(v, self.gd.name(v) if v in self.gd.items else self.gd.activities[v]["name"])
             reqs.append(text)
         return f"{name}: {'; '.join(reqs)}" if reqs else name
+
+    def _service(self, sid: str) -> dict:
+        sv = next((x for x in self.gd.snap.get("services_list") or [] if x["id"] == sid), {"id": sid, "name": sid})
+        text = f"{sid} {sv.get('icon', '')}"
+        kind = next((k for k in SERVICE_KINDS if k in text), None)
+        tier = "advanced" if "advanced" in sid else "basic" if kind in ("kitchen", "loom", "workshop", "trinketry_bench",
+                                                                         "sawmill", "forge") else None
+        return {"id": sid, "name": sv.get("name", sid), "kind": kind, "tier": tier}
+
+    def _base_distances(self, src: str) -> tuple[dict[str, float], dict[str, tuple[str, dict]]]:
+        """Shortest base-step distances from src over legs the character can travel. Gear requirements
+        (skis, diving gear, light sources) count as travelable; permits and levels are checked."""
+        graph, dist, prev, pq = self._route_graph(), {src: 0}, {}, [(0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u]:
+                continue
+            for v, r in graph.get(u, []):
+                ctx = self._leg_context(u, r)
+                if not check_all([q for q in ctx.activity["requirements"] if q["type"] not in GEAR_DEPENDENT_REQS],
+                                 ctx, None):
+                    continue
+                if d + r["distance"] < dist.get(v, math.inf):
+                    dist[v], prev[v] = d + r["distance"], (u, r)
+                    heapq.heappush(pq, (dist[v], v))
+        return dist, prev
+
+    def find_services(self, service: str, near: str, top: int = 5) -> dict:
+        gd = self.gd
+        src = gd.resolve(near, "location")
+        q = norm(service)
+        known = [self._service(x["id"]) for x in gd.snap.get("services_list") or []]
+        wanted = {sv["id"]: sv for sv in known if sv["kind"] == q or q in norm(sv["name"])}
+        if not wanted:
+            kinds = sorted({sv["kind"] for sv in known if sv["kind"]})
+            raise KeyError(f"No service matching {service!r}. Kinds: {kinds}")
+        dist, prev = self._base_distances(src)
+        rows = []
+        for lid, loc in gd.locations.items():
+            here = [wanted[x] for x in loc.get("serviceList") or [] if x in wanted]
+            if not here:
+                continue
+            row = {"location": loc["name"], "services": [f"{sv['name']}" + (f" ({sv['tier']})" if sv["tier"] and
+                                                         sv["tier"] not in sv["name"].lower() else "") for sv in here]}
+            if lid not in dist:
+                row["reachable"] = False
+                rows.append((math.inf, row))
+                continue
+            path, needs, x = [], [], lid
+            while x != src:
+                u, r = prev[x]
+                path.append(gd.locations[x]["name"])
+                needs += [self._modifier_label(m) for m in self._leg_modifiers(r, u)]
+                x = u
+            row["base_steps"] = dist[lid]
+            if path:
+                row["route"] = " → ".join([gd.locations[src]["name"], *path[::-1]])
+            if needs:
+                row["route_requires"] = list(dict.fromkeys(needs))
+            rows.append((dist[lid], row))
+        rows.sort(key=lambda t: t[0])
+        return {
+            "service": service, "near": gd.locations[src]["name"],
+            "locations": [r for _, r in rows[:top]],
+            "note": "base_steps is route distance before travel gear; call plan_route for the trip with optimized gear.",
+        }
 
     def plan_route(self, start: str, destination: str, via: list[str] | None = None, avoid: list[str] | None = None,
                    pet: str | None = "auto", owned_only: bool = True) -> dict:
