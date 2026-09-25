@@ -611,10 +611,16 @@ class Service:
         recorded = sum(known[a]["points"] for a, v in ach.items() if v.get("unlocked") and a in known)
         out = {"achievements": rows, "recorded_unlocked_points": recorded}
         if self._player:
-            out["save_achievement_points"] = self._player.achievement_points
-            if recorded < self._player.achievement_points:
-                out["note"] = ("The save has more points than the recorded unlocks add up to, so some unlocked "
-                               "achievements aren't recorded yet. 'not recorded' may still be unlocked; ask the user.")
+            # every collectible found is also worth 1 achievement point (wiki)
+            collectibles = len(self._player.collectibles)
+            out["collectible_points"] = collectibles
+            out["character_achievement_points"] = self._player.achievement_points
+            missing = self._player.achievement_points - recorded - collectibles
+            if missing > 0:
+                out["note"] = (f"{missing} points aren't explained by recorded achievements + collectibles, so some "
+                               "unlocked achievements aren't recorded yet. 'not recorded' may still be unlocked; ask.")
+            out["collectibles_not_found"] = sum(1 for i in self.gd.items.values() if i.get("type") == "collectible") \
+                - collectibles
         unmatched = sorted(a for a in ach if a not in known)
         if unmatched:
             out["recorded_but_not_on_wiki"] = unmatched

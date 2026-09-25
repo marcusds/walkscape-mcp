@@ -124,7 +124,8 @@ def remember_player_info(
 def achievements(show: str = "not_unlocked") -> dict:
     """Every achievement (wiki list: difficulty, points, requirements, rewards) with the user's recorded status.
     show: "not_unlocked" (default; for "what should I go for next"), "unlocked" or "all".
-    The save only has a point total, so an achievement the user never mentioned shows as "not recorded"."""
+    The save only has a point total, so an achievement the user never mentioned shows as "not recorded".
+    Collectibles are worth 1 achievement point each when found, so they count toward point goals too."""
     return s().achievements(show)
 
 
