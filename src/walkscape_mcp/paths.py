@@ -30,3 +30,10 @@ def player_file() -> Path:
 def player_info_file() -> Path:
     """Facts the user told us that the save export doesn't contain (kept across save reloads)."""
     return home() / "player_info.json"
+
+
+def save_history_dir() -> Path:
+    """Every character export loaded, one file each, for comparing progress between them."""
+    p = home() / "save_history"
+    p.mkdir(exist_ok=True)
+    return p

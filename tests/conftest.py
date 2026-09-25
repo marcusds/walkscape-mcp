@@ -30,6 +30,8 @@ def svc(gd, player, tmp_path, monkeypatch):
     from walkscape_mcp.wiki import Wiki
 
     monkeypatch.setattr("walkscape_mcp.service.player_info_file", lambda: tmp_path / "player_info.json")
+    (tmp_path / "history").mkdir()
+    monkeypatch.setattr("walkscape_mcp.service.save_history_dir", lambda: tmp_path / "history")
     svc = Service.__new__(Service)
     svc._gd, svc._player, svc._not_met = gd, player, {}
     svc._reload_snapshot = lambda: None

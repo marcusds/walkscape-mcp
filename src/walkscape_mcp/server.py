@@ -24,6 +24,7 @@ Workflow:
    Crafting N of something -> plan_recipe; crafting gear of a quality (Perfect, Eternal...) -> craft_quality; "how long to level X" -> steps_to_level; "when is my inventory full"
    -> inventory_fill. Several items at once -> targets on rank_activities / optimize_loadout (objective "items").
    Remember where the player is (remember_player_info location) so travel-aware tools start there.
+   "How many steps/XP since...?" -> compare_saves (asks for a fresh export if needed).
    Away from a bank, the player can only use gear they carry: pass carried_only=true (ask if unsure).
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
 6. When the user mentions something about their character that the save export doesn't contain (how many times
@@ -54,6 +55,15 @@ def load_player_save(save_json: str) -> dict:
     """Load the player's exported character data (the JSON from the game, or a path to a file containing it).
     Persists it so later sessions remember it. Returns a summary: levels, equipped gear, pets, collectibles."""
     return s().load_save(save_json)
+
+
+@mcp.tool()
+def compare_saves(older: int = -2, newer: int = -1) -> dict:
+    """Progress between two character exports the server has stored (every pasted export is kept): steps walked,
+    XP and levels per skill, achievement points, collectibles, gear and items gained or used, coins, reputation.
+    older/newer index the history oldest first (negative from the end; default: previous vs latest). The result
+    lists all stored saves with their step counts."""
+    return s().compare_saves(older, newer)
 
 
 @mcp.tool()

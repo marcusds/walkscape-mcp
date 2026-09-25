@@ -46,7 +46,7 @@ from .optimizer import (
     prepare,
     quick_score,
 )
-from .paths import player_file, player_info_file, snapshot_dir
+from .paths import player_file, player_info_file, save_history_dir, snapshot_dir
 from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .quality import at_least, quality_odds
 from .services import parse_services_page
@@ -178,6 +178,7 @@ class Service:
         data = json.loads(text)
         player = parse_save(self.gd, data)
         player_file().write_text(json.dumps(data))
+        self._record_history(data)
         self._save = player
         with self._info_lock():
             info = self._info()
@@ -192,6 +193,73 @@ class Service:
             self._stamp_version(player.game_version)
         elif self._needs_refresh(player.game_version):
             out["note"] = self.refresh_in_background(player.game_version)
+        return out
+
+    # ---------- save history ----------
+
+    def _record_history(self, data: dict):
+        """Keep a copy of each distinct export (the same lifetime step count is the same export)."""
+        d = save_history_dir()
+        steps = data.get("steps", 0)
+        if any(f.stem.endswith(f"-{steps}") for f in d.glob("*.json")):
+            return
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        (d / f"{stamp}-{steps}.json").write_text(json.dumps(data))
+
+    def _history(self) -> list[tuple[str, dict]]:
+        """(load time, export) oldest first, ordered by lifetime steps."""
+        out = []
+        for f in save_history_dir().glob("*.json"):
+            try:
+                out.append((f.stem.split("-")[0], json.loads(f.read_text())))
+            except (ValueError, OSError):
+                continue
+        return sorted(out, key=lambda t: t[1].get("steps", 0))
+
+    def compare_saves(self, older: int = -2, newer: int = -1) -> dict:
+        """Progress between two stored exports (indexes into the history, oldest first; negatives from the end)."""
+        gd, hist = self.gd, self._history()
+        listing = [{"index": i, "loaded": f"{t[:4]}-{t[4:6]}-{t[6:8]} {t[9:11]}:{t[11:13]}", "steps": d.get("steps", 0)}
+                   for i, (t, d) in enumerate(hist)]
+        if len(hist) < 2:
+            return {"saves": listing, "note": "Need at least two exports to compare; paste another later."}
+        try:
+            (t0, a), (t1, b) = hist[older], hist[newer]
+        except IndexError:
+            raise ValueError(f"No save at that index. Saves: {listing}")
+        pa, pb = parse_save(gd, a), parse_save(gd, b)
+        la, lb = pa.skill_levels, pb.skill_levels
+        skills = {}
+        for sk in sorted(set(pa.skill_xp) | set(pb.skill_xp)):
+            dx = pb.skill_xp.get(sk, 0) - pa.skill_xp.get(sk, 0)
+            if dx:
+                skills[sk] = {"xp_gained": dx, "level": f"{la.get(sk, 1)} → {lb.get(sk, 1)}"
+                              if la.get(sk, 1) != lb.get(sk, 1) else lb.get(sk, 1)}
+
+        def counts(p):
+            return {k: n + f for k, (n, f) in p.item_counts.items()}
+
+        ca, cb = counts(pa), counts(pb)
+        changes = {gd.name(k): cb.get(k, 0) - ca.get(k, 0) for k in set(ca) | set(cb) if cb.get(k, 0) != ca.get(k, 0)}
+        gained = sorted(((n, k) for k, n in changes.items() if n > 0), reverse=True)
+        spent = sorted((n, k) for k, n in changes.items() if n < 0)
+        out = {
+            "from": listing[older % len(hist)], "to": listing[newer % len(hist)],
+            "steps": pb.steps - pa.steps,
+            "character_level": f"{pa.char_level} → {pb.char_level}" if pa.char_level != pb.char_level else pb.char_level,
+            "achievement_points": pb.achievement_points - pa.achievement_points,
+            "coins": pb.coins - pa.coins,
+            "skills": skills,
+            "collectibles_found": [gd.name(c) for c in pb.collectibles if c not in pa.collectibles],
+            "gear_gained": sorted(gear_source(gd, oi).label for k, oi in pb.owned_gear.items() if k not in pa.owned_gear),
+            "items_gained": {k: n for n, k in gained[:25]},
+            "items_used_or_lost": {k: n for n, k in spent[:25]},
+            "reputation": {f: round(pb.reputation.get(f, 0) - pa.reputation.get(f, 0), 2)
+                           for f in set(pa.reputation) | set(pb.reputation)
+                           if pb.reputation.get(f, 0) != pa.reputation.get(f, 0)},
+            "saves": listing,
+            "note": "Item counts are bank + inventory; currencies (tokens, chips) are included.",
+        }
         return out
 
     # ---------- facts the save doesn't contain ----------

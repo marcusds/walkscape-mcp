@@ -166,3 +166,20 @@ def test_carrying_gear_found_in_the_same_call(svc):
     out = svc.remember_player_info(gear_found=["Adventuring sewing needle"], carrying=["Adventuring sewing needle"])
     assert "skipped" not in out, out.get("skipped")
     assert {oi.id for oi in svc._player.carried_gear.values()} == {"adventuring_sewing_needle"}
+
+
+def test_save_history_and_compare(loading_svc, tmp_path, monkeypatch):
+    svc = loading_svc
+    save = json.loads(SAVE.read_text())
+    svc.load_save(json.dumps(save))
+    assert "Need at least two" in svc.compare_saves()["note"]
+    later = json.loads(json.dumps(save))
+    later["steps"] += 5000
+    later["skills"]["foraging"] = later["skills"].get("foraging", 0) + 1234
+    later["collectibles"] = [*later.get("collectibles", []), "petrified_branch"]
+    svc.load_save(json.dumps(later))
+    svc.load_save(json.dumps(later))  # the same export again isn't stored twice
+    out = svc.compare_saves()
+    assert out["steps"] == 5000 and len(out["saves"]) == 2
+    assert out["skills"]["foraging"]["xp_gained"] == 1234
+    assert out["collectibles_found"] == ["Petrified branch"]
