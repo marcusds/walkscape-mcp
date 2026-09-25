@@ -75,6 +75,7 @@ class Context:
     history_met: dict[str, float] = field(default_factory=dict)
     history_not_met: dict[str, float] = field(default_factory=dict)
     explored: set[str] = field(default_factory=set)  # regions the user said they've fully explored
+    service: dict | None = None  # recipes: the crafting service used ({"id", "name", "attrs", ...})
     assume_unknown_true: bool = True
 
     def __post_init__(self):
@@ -238,7 +239,7 @@ def static_check(reqs, ctx: Context) -> tuple[bool, list, set, set, object]:
 class Source:
     """A thing that contributes attributes: an item, pet, consumable, collectible or level bonus."""
 
-    kind: str  # gear | pet | consumable | collectible | level
+    kind: str  # gear | pet | consumable | collectible | level | service
     id: str
     label: str
     attrs: list[dict]
@@ -295,6 +296,8 @@ def static_sources(ctx: Context) -> list[Source]:
     for c in ctx.collectibles:
         if c in gd.items and gd.items[c].get("itemAttrs"):
             out.append(Source("collectible", c, gd.name(c), gd.item_attrs(c)))
+    if ctx.service and ctx.service.get("attrs"):
+        out.append(Source("service", ctx.service["id"], ctx.service["name"], ctx.service["attrs"]))
     return out
 
 

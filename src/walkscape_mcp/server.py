@@ -21,7 +21,7 @@ Workflow:
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
 4. For "where should I farm X" call rank_activities. For "how do I get to X" / travel gear, call plan_route;
    for "nearest sawmill/kitchen/...", find_services. Recipes needing a service are done at any location with it.
-   Crafting N of something -> plan_recipe; "how long to level X" -> steps_to_level; "when is my inventory full"
+   Crafting N of something -> plan_recipe; crafting gear of a quality (Perfect, Eternal...) -> craft_quality; "how long to level X" -> steps_to_level; "when is my inventory full"
    -> inventory_fill. Several items at once -> targets on rank_activities / optimize_loadout (objective "items").
    Remember where the player is (remember_player_info location) so travel-aware tools start there.
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
@@ -251,6 +251,16 @@ def plan_recipe(recipe: str, count: int, near: str | None = None, pet: str | Non
     material needed vs owned, and for any shortfall the best place to gather it and the steps. Also the nearest
     location with the required service (from `near`, default the remembered current location)."""
     return s().plan_recipe(recipe, count, near, pet)
+
+
+@mcp.tool()
+def craft_quality(recipe: str, quality: str = "Perfect", fine_materials: bool = False, location: str | None = None,
+                  pet: str | None = "auto") -> dict:
+    """Odds of each quality (Normal, Good, Great, Excellent, Perfect, Eternal) when crafting gear, and the best
+    owned loadout and crafting service for getting at least `quality`: expected crafts, steps and materials.
+    Quality outcome comes from skill level over the recipe's level, gear, consumables and the service.
+    fine_materials: crafting with fine materials moves every roll up one quality."""
+    return s().craft_quality(recipe, quality, fine_materials, location, pet)
 
 
 @mcp.tool()

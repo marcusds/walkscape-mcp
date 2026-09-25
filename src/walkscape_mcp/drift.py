@@ -52,7 +52,7 @@ WIKI_PAGES = [
     "Double_Rewards_(Mechanics)", "No_Materials_Consumed_(Mechanics)", "Chest_Finding_(Mechanics)",
     "Fine_Material_Finding_(Mechanics)", "Find_Gems_(Mechanics)", "Find_Collectibles_(Mechanics)",
     "Find_Bird_Nests_(Mechanics)", "Roll_Special_Table_(Mechanics)", "Bonus_Experience_(Mechanics)",
-    "Skill_Experience", "Character_Level",
+    "Skill_Experience", "Character_Level", "Travelling_(Mechanics)", "Quality_Outcome_(Mechanics)",
 ]
 
 KEEP_SHORT = {"if", "in", "do", "of", "e", "t"}  # keep a few tokens so normalized code stays readable

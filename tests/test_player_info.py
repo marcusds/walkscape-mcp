@@ -3,18 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from walkscape_mcp.service import Service
-
 SAVE = Path(__file__).parent / "fixtures" / "save.json"
-
-
-@pytest.fixture
-def svc(gd, player, tmp_path, monkeypatch):
-    monkeypatch.setattr("walkscape_mcp.service.player_info_file", lambda: tmp_path / "player_info.json")
-    svc = Service.__new__(Service)  # skip __init__: no snapshot reload or background refresh
-    svc._gd, svc._player, svc._not_met = gd, player, {}
-    svc._reload_snapshot = lambda: None
-    return svc
 
 
 @pytest.fixture

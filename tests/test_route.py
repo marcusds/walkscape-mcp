@@ -1,22 +1,13 @@
+import itertools
+
 import pytest
-
-from walkscape_mcp.service import Service
-
-
-@pytest.fixture
-def svc(gd, player, tmp_path, monkeypatch):
-    monkeypatch.setattr("walkscape_mcp.service.player_info_file", lambda: tmp_path / "player_info.json")
-    svc = Service.__new__(Service)
-    svc._gd, svc._player, svc._not_met = gd, player, {}
-    svc._reload_snapshot = lambda: None
-    return svc
 
 
 def test_route_legs_connect_and_gear_beats_base_distance(svc):
     out = svc.plan_route("Everhaven", start="Azurazera")
     legs = [l["leg"].split(" → ") for l in out["legs"]]
     assert legs[0][0] == "Azurazera" and legs[-1][1] == "Everhaven"
-    assert all(a[1] == b[0] for a, b in zip(legs, legs[1:]))
+    assert all(a[1] == b[0] for a, b in itertools.pairwise(legs))
     assert out["steps_swapping_gear_each_leg"] < out["base_steps"]
     assert out["steps_swapping_gear_each_leg"] <= out["single_loadout"]["steps"]
     border = next(l for l in out["legs"] if l["leg"] == "Fort of Permafrost → Noiseless Pass")

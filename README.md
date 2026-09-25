@@ -7,7 +7,7 @@ An MCP server for optimizing WalkScape loadouts by talking to Claude, e.g.
 ## Data sources
 
 - **Game data** – the official gear planner API (`gear.walkscape.app`): exact item stats per quality, attribute conditions, activities, loot table weights, pets, recipes. Snapshotted to `~/.local/share/walkscape-mcp/snapshot/` and refreshed in the background when a loaded save reports a different game version, or after 7 days as a fallback. A full refresh takes about 6 minutes: the API is slow, and requests are capped at 4 in flight to keep load off it. The running server keeps using the old snapshot and switches to the new one when the refresh finishes.
-- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h, so wiki.walkscape.app itself gets no traffic. Used for mechanics, lore, shops and anything the structured data doesn't cover.
+- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h, so wiki.walkscape.app itself gets no traffic. Used for mechanics, lore, shops and anything the structured data doesn't cover, and parsed for the crafting service bonuses (Services page) and the achievement list.
 
 ## Setup
 
@@ -19,7 +19,9 @@ claude mcp add --scope user walkscape -- uv run --directory "$PWD" walkscape-mcp
 
 Then in Claude, paste your character export (in-game: Settings → Export character data) and ask away. The save is stored so you only paste it again when your gear or levels change. The wiki dump downloads by itself the first time it's needed.
 
-The export leaves out some things, such as how many times you've completed an activity. Some gear bonuses and activities unlock after a number of completions (skis, skydiscs, diving gear). Results assume these unlocks are reached and list them, and Claude asks whether you have. A "yes" is saved in `player_info.json`, along with any achievements or other facts you mention, and survives pasting a new save. A "not yet" lasts only for the current session, because your counts keep growing.
+The export leaves out some things, such as how many times you've completed an activity. Some gear bonuses and activities unlock after a number of completions (skis, skydiscs, diving gear). Results assume these unlocks are reached and list them, and Claude asks whether you have. A "yes" is saved in `player_info.json` and survives pasting a new save. A "not yet" lasts only for the current session, because your counts keep growing.
+
+`player_info.json` also keeps achievements (unlocked and in progress), goals, fully explored regions, your current location, and gear, skill levels and item counts gained since the last export. Those last three are applied to your character for every tool and dropped once a newer save includes them. Every open Claude session runs its own server process, so writes to the file are locked.
 
 To maintain the hand-ported logic (see [Keeping it up to date](#keeping-it-up-to-date)), also run:
 
@@ -33,16 +35,23 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | Tool | Purpose |
 | --- | --- |
 | `load_player_save` / `player_summary` | Load and inspect your character export |
-| `remember_player_info` | Store what the export lacks: action-history unlocks you've reached, achievements and other notes |
-| `optimize_loadout` | Best loadout for an activity/recipe and objective, using owned gear; shows the diff from your current gear, unowned upgrades and an export string |
+| `remember_player_info` | Store what the export lacks: action-history unlocks, achievements, goals, explored regions, current location, and gear/levels/items gained since the export |
+| `achievements` | Every achievement with points, requirements and your recorded status |
+| `optimize_loadout` | Best loadout for an activity/recipe and objective, using owned gear; shows the diff from your current gear, unowned upgrades, an export string and a planner link. Recipes also pick the best crafting service location |
 | `evaluate_loadout` | Stats, steps and drop rates for your current gear or a gear-set string |
-| `rank_activities` | Where to farm an item in the fewest steps |
+| `rank_activities` | Where to farm an item (or its fine version, or several items at once) in the fewest steps, optionally counting travel from where you are |
+| `plan_route` | Fastest route between locations with the best travel gear per leg, respecting terrain requirements |
+| `find_services` | Nearest sawmills, kitchens, forges... with each service's bonuses and requirements |
+| `plan_recipe` | Crafting N of something: crafts, steps, materials vs owned, where to gather the shortfall |
+| `craft_quality` | Odds of each crafted quality and the best loadout/service for a target quality |
+| `steps_to_level` | XP and steps to reach a level with an activity |
+| `inventory_fill` | Steps until an activity's drops fill N inventory slots |
 | `get_item` / `get_activity` / `get_location` / `search_game_data` | Lookups |
 | `decode_gear_set` | Read a gear.walkscape.app export string |
 | `wiki_search` / `wiki_page` | Offline wiki |
 | `data_status` | Data freshness; `refresh=true` forces an update |
 
-Objectives: `item`, `fine_item`, `xp`, `total_xp`, `reward_rolls`, `actions`, `fine`, `chests`, `gems`, `collectibles`.
+Objectives: `item`, `fine_item`, `xp`, `total_xp`, `reward_rolls`, `actions`, `fine`, `chests`, `gems`, `collectibles`, `items` (several items with quantities).
 
 ## Model
 
@@ -53,6 +62,10 @@ The step and drop formulas are ported from the official planner's optimiser work
 - Chest, gem, collectible and bird-nest tables scale by their finding stat. Fine materials use 1% × (1 + fine finding).
 - "Chance to find X" gear rolls once per reward roll, the same way the planner handles it.
 - Attributes are active only when their conditions hold: skill, skill type, location keywords, realm, set-piece counts, equipped keywords, pet abilities, reputation and so on. Tool slots follow character level, and tools with banned keyword combinations (two pickaxes, for example) can't be equipped together.
+- Travel: distance ÷ work efficiency (+0.5% per agility level, no cap), split into 10 actions, flat step reductions per action, rounded up, minimum 10 steps per action (wiki Travelling mechanics). Location-conditional gear is counted at each leg's starting location.
+- Crafting services: bonuses and requirements from the wiki's Services page count like gear, so recipes are evaluated at each location with a fitting service. Advanced services are assumed to cover basic recipes too.
+- Crafted quality: quality outcome = levels above the recipe's + gear, consumable and service quality outcome, run through the wiki's band/weight formula with its standard weights (the game data has no per-recipe weights). Fine materials move each roll up one quality.
+- Hidden activities (e.g. Summer cave foraging after Spring bat tracking) are checked against remembered action history and flagged or skipped.
 
 The optimizer builds a loadout greedily, then hill-climbs one slot at a time, including the pet and consumable. It also seeds each set bonus so multi-piece sets get a fair trial.
 
@@ -60,8 +73,6 @@ Afterwards, any slot the objective left empty is filled with gear that adds side
 
 ### Not modelled
 
-- Crafting service bonuses. For recipes, the service requirement is assumed met.
-- Quality-outcome odds.
 - Level-scaled loot weights for fishing.
 - A few rare requirement types (`skillTypeLevel`, `inputKeywordWithLevel`). These are assumed satisfied and reported in `notes`.
 

@@ -1,16 +1,5 @@
 import pytest
 
-from walkscape_mcp.service import Service
-
-
-@pytest.fixture
-def svc(gd, player, tmp_path, monkeypatch):
-    monkeypatch.setattr("walkscape_mcp.service.player_info_file", lambda: tmp_path / "player_info.json")
-    svc = Service.__new__(Service)
-    svc._gd, svc._player, svc._not_met = gd, player, {}
-    svc._reload_snapshot = lambda: None
-    return svc
-
 
 def test_remembered_location_is_the_default_start(svc):
     with pytest.raises(ValueError, match="Where is the player"):

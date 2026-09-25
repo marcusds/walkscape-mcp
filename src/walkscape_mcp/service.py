@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import difflib
-import heapq
 import fcntl
+import heapq
+import itertools
 import json
 import math
 import os
@@ -16,13 +17,38 @@ from pathlib import Path
 
 from . import gearset, sync
 from .engine import (
-    GEAR_DEPENDENT_REQS, Context, Loadout, check_all, check_requirement, drop_report, evaluate, gear_source, history_key,
+    GEAR_DEPENDENT_REQS,
+    Context,
+    Loadout,
+    check_all,
+    check_requirement,
+    drop_report,
+    evaluate,
+    gear_source,
+    history_key,
     slot_type,
 )
-from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, norm, strip_markup
-from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
+from .gamedata import (
+    QUALITIES,
+    QUALITY_NAMES,
+    GameData,
+    describe_requirement,
+    norm,
+    strip_markup,
+)
+from .optimizer import (
+    OBJECTIVES,
+    Objective,
+    all_gear_pool,
+    optimize,
+    player_loadout,
+    prepare,
+    quick_score,
+)
 from .paths import player_file, player_info_file, snapshot_dir
 from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
+from .quality import at_least, quality_odds
+from .services import parse_services_page
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
@@ -263,9 +289,72 @@ class Service:
 
     def _context(self, activity_id: str, location_id: str | None) -> Context:
         info = self._info()
-        return Context.for_player(self.gd, self._player, activity_id, location_id,
-                                  history_met=info["history"], history_not_met=self._not_met,
-                                  explored=set(info["explored"]))
+        ctx = Context.for_player(self.gd, self._player, activity_id, location_id,
+                                 history_met=info["history"], history_not_met=self._not_met,
+                                 explored=set(info["explored"]))
+        if activity_id in self.gd.recipes and location_id and (sv := self._recipe_service_at(activity_id, location_id)):
+            # the service's bonuses count like gear; gear it needs (e.g. diving gear) becomes a requirement
+            ctx.service = sv
+            gear_reqs = [r for r in sv["requirements"] if r["type"] in GEAR_DEPENDENT_REQS]
+            if gear_reqs:
+                ctx.activity = {**ctx.activity, "requirements": [*(ctx.activity.get("requirements") or []), *gear_reqs]}
+        return ctx
+
+    # ---------- crafting services ----------
+
+    def service_table(self) -> dict[str, dict]:
+        """Service id -> {id, name, kind, tier, attrs, requirements, attr_text}, bonuses from the wiki."""
+        tag = self.wiki.state().get("tag")
+        if getattr(self, "_services_for", None) != tag or getattr(self, "_services", None) is None:
+            try:
+                self.wiki.update()
+                wiki = {norm(k): v for k, v in parse_services_page(self.wiki.page("Services", 1_000_000)).items()}
+            except Exception:
+                wiki = {}
+            out = {}
+            for x in self.gd.snap.get("services_list") or []:
+                base = self._service(x["id"])
+                w = wiki.get(norm(base["name"]), {})
+                out[x["id"]] = {**base, "tier": w.get("tier", base["tier"]), "attrs": w.get("attrs", []),
+                                "requirements": w.get("requirements", []), "attr_text": w.get("attr_text", ""),
+                                "on_wiki": bool(w)}
+            self._services, self._services_for = out, tag
+        return self._services
+
+    def _recipe_service_req(self, rid: str) -> dict | None:
+        return next((r["requirement"] for r in self.gd.recipes[rid].get("requirements") or []
+                     if r["type"] == "service"), None)
+
+    def _serves(self, sv: dict, need: dict) -> bool:
+        """A service fits a recipe if it's the right kind and tier. Advanced services are assumed to cover basic
+        recipes too."""
+        return sv["kind"] == need.get("serviceKeyword") and (need.get("tier") != "advanced" or sv["tier"] == "advanced")
+
+    def _recipe_service_at(self, rid: str, lid: str) -> dict | None:
+        need = self._recipe_service_req(rid)
+        if not need:
+            return None
+        table = self.service_table()
+        fits = [table[x] for x in self.gd.locations[lid].get("serviceList") or [] if x in table and self._serves(table[x], need)]
+        return fits[0] if fits else None
+
+    def _recipe_locations(self, rid: str) -> list[str]:
+        """Locations with a service for the recipe that the character can use, one per distinct setting
+        (service, region, location keywords), since otherwise identical kitchens give identical results."""
+        gd, seen, out = self.gd, set(), []
+        for lid, loc in gd.locations.items():
+            sv = self._recipe_service_at(rid, lid)
+            if not sv:
+                continue
+            key = (sv["id"], loc.get("faction"), frozenset(loc.get("keywords") or []))
+            if key in seen:
+                continue
+            ctx = Context.for_player(gd, self._player, rid, lid)
+            if not check_all([r for r in sv["requirements"] if r["type"] not in GEAR_DEPENDENT_REQS], ctx, None):
+                continue
+            seen.add(key)
+            out.append(lid)
+        return out
 
     def _history_thresholds(self) -> dict[str, list[float]]:
         """Every action-history threshold in the game data, by key."""
@@ -719,6 +808,15 @@ class Service:
 
     def _locations_for(self, aid: str, location: str | None) -> list[str | None]:
         gd = self.gd
+        if aid in gd.recipes and self._recipe_service_req(aid):
+            if location:
+                lid = gd.resolve(location, "location")
+                if not self._recipe_service_at(aid, lid):
+                    need = self._recipe_service_req(aid)
+                    raise ValueError(f"{gd.locations[lid]['name']} has no {need.get('serviceKeyword')} "
+                                     f"({need.get('tier')}); find_services lists where to go.")
+                return [lid]
+            return self._recipe_locations(aid) or [None]
         if location:
             lid = gd.resolve(location, "location")
             if aid in gd.activities and lid not in gd.activity_locations(aid):
@@ -823,8 +921,13 @@ class Service:
                          "and record it with remember_player_info (completed or not_yet).")
         if ctx.unverified:
             notes.append(f"Requirement types not modelled (assumed satisfied): {sorted(ctx.unverified)}")
-        if ctx.is_recipe:
-            notes.append("Recipe: crafting service bonuses/penalties are not modelled; service requirement assumed met.")
+        if ctx.is_recipe and ctx.service:
+            sv = ctx.service
+            notes.append(f"Crafted at {sv['name']} in {self.gd.locations[ctx.location_id]['name']}"
+                         + (f": {sv['attr_text']}" if sv.get("attrs") else " (no service bonuses)")
+                         + ("" if sv.get("on_wiki") else "; bonuses unknown (not on the wiki's Services page)") + ".")
+        elif ctx.is_recipe and self._recipe_service_req(ctx.activity_id):
+            notes.append("Recipe: no usable service location found, so service bonuses aren't counted.")
         if not self._player:
             notes.append("No character loaded: assuming level 99 in all skills.")
         return notes
@@ -860,6 +963,7 @@ class Service:
         out: dict = {
             "activity": ctx.activity["name"],
             "location": gd.locations[loc]["name"] if loc else None,
+            **({"service": ctx.service["name"]} if ctx.service else {}),
             "objective": f"{obj.kind}" + (f" ({gd.name(obj.target) if obj.kind in ('item', 'fine_item') else obj.target})" if obj.target else "")
                          + (f" ({', '.join(f'{n} {gd.name(i)}' for i, n in obj.targets.items())})" if obj.targets else ""),
             "result": obj.describe(score[1]),
@@ -990,7 +1094,7 @@ class Service:
         if src is None:
             raise ValueError("Where is the player? Pass near, or remember their location with remember_player_info.")
         q = norm(service)
-        known = [self._service(x["id"]) for x in gd.snap.get("services_list") or []]
+        known = list(self.service_table().values())
         wanted = {sv["id"]: sv for sv in known if sv["kind"] == q or q in norm(sv["name"])}
         if not wanted:
             kinds = sorted({sv["kind"] for sv in known if sv["kind"]})
@@ -1001,8 +1105,11 @@ class Service:
             here = [wanted[x] for x in loc.get("serviceList") or [] if x in wanted]
             if not here:
                 continue
-            row = {"location": loc["name"], "services": [f"{sv['name']}" + (f" ({sv['tier']})" if sv["tier"] and
-                                                         sv["tier"] not in sv["name"].lower() else "") for sv in here]}
+            row = {"location": loc["name"], "services": [
+                f"{sv['name']}" + (f" ({sv['tier']})" if sv["tier"] and sv["tier"] not in sv["name"].lower() else "")
+                + (f": {sv['attr_text']}" if sv.get("attrs") else "")
+                + (f" [needs: {'; '.join(self._req_text(r) for r in sv['requirements'])}]" if sv.get("requirements") else "")
+                for sv in here]}
             if lid not in dist:
                 row["reachable"] = False
                 rows.append((math.inf, row))
@@ -1101,7 +1208,7 @@ class Service:
                 x = u
             return path[::-1]
 
-        path = [hop for a, b in zip(stops, stops[1:]) for hop in shortest(a, b)]
+        path = [hop for a, b in itertools.pairwise(stops) for hop in shortest(a, b)]
         candidates = list({id(lo): lo for *_, lo in (leg(u, r) for u, _, r in path)}.values())
         legs = []
         for u, v, r in path:
@@ -1306,6 +1413,7 @@ class Service:
             if best is None or sc < best[0]:
                 best = (sc, ctx, lo)
         _, ctx, lo = best
+        ctx.assumed_history.clear()  # report only what the chosen loadout depends on
         return ctx, lo, evaluate(ctx, lo)
 
     def plan_recipe(self, recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
@@ -1346,6 +1454,7 @@ class Service:
         out = {
             "recipe": r["name"], "makes": f"{count} {gd.name(out_item)}",
             "completions": completions, "crafting_steps": steps, "materials": materials,
+            **({"craft_at": f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"} if ctx.service else {}),
             "steps_gathering_shortfall": gather_total, "total_steps": steps + gather_total,
             "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
             "planner_link": gearset.encode_link(gd, lo, rid),
@@ -1354,9 +1463,7 @@ class Service:
         }
         svc = next((q["requirement"] for q in r.get("requirements") or [] if q["type"] == "service"), None)
         if svc and src:
-            kinds = [self._service(x["id"]) for x in gd.snap.get("services_list") or []]
-            ok = {sv["id"] for sv in kinds if sv["kind"] == svc.get("serviceKeyword")
-                  and (svc.get("tier") != "advanced" or sv["tier"] == "advanced")}
+            ok = {sid for sid, sv in self.service_table().items() if self._serves(sv, svc)}
             dist = self._base_distances(src)[0]
             here = sorted((dist.get(lid, math.inf), l["name"]) for lid, l in gd.locations.items()
                           if ok & set(l.get("serviceList") or []))
@@ -1367,6 +1474,57 @@ class Service:
                         "'no materials consumed' saves ingredients.",
                         "Gathering steps exclude travel; rank_activities/plan_route give the trips."]
         return out
+
+    def _quality_name(self, q: str) -> str:
+        """'Perfect' / 'legendary' -> 'legendary'."""
+        q = q.strip().lower()
+        by_name = {v.lower(): k for k, v in QUALITY_NAMES.items()}
+        if q in QUALITIES:
+            return q
+        if q in by_name:
+            return by_name[q]
+        raise ValueError(f"Unknown quality {q!r}. Qualities: {list(QUALITY_NAMES.values())}")
+
+    def craft_quality(self, recipe: str, quality: str = "Perfect", fine_materials: bool = False,
+                      location: str | None = None, pet: str | None = "auto") -> dict:
+        gd = self.gd
+        _, rid = self._resolve_any(recipe, ["recipe"])
+        r = gd.recipes[rid]
+        out_item = next(iter(r.get("itemRewards") or {}), None)
+        if not out_item or not gd.items.get(out_item, {}).get("gearType") or gd.items[out_item].get("type") != "crafted":
+            raise ValueError(f"{r['name']} doesn't make gear that comes in qualities")
+        q = self._quality_name(quality)
+        probe = self._context(rid, None)
+        level_bonus = max(0, probe.skill_levels.get(probe.main_skill, 1) - probe.required_level)
+        obj = Objective("quality", q, recipe_level=probe.required_level, level_bonus=level_bonus, fine=fine_materials)
+        ctx, lo, ev = self._best_loadout(rid, obj, location, pet)
+        m = ev.metrics
+        outcome = level_bonus + m["quality_outcome"]
+        odds = quality_odds(ctx.required_level, outcome, fine_materials)
+        p = at_least(odds, q)
+        crafts = 1 / p if p else math.inf
+        return {
+            "recipe": r["name"], "item": gd.name(out_item), "target": f"{QUALITY_NAMES[q]} or better",
+            "fine_materials": fine_materials,
+            "quality_outcome": {"total": outcome, "from_level": level_bonus,
+                                "from_gear_and_service": m["quality_outcome"]},
+            "odds_per_item": {QUALITY_NAMES[k]: f"{v * 100:.3f}%" for k, v in odds.items()},
+            "chance_of_target": f"{p * 100:.3f}%",
+            "expected_items_crafted": round(crafts, 1),
+            "expected_steps": round(m["steps_per_reward_roll"] * crafts) if p else None,
+            "materials_expected": {gd.name(o["options"][0]["item"]):
+                                   round(o["options"][0]["amount"] * crafts / (1 + m["double_rewards"])
+                                         * (1 - m["no_materials_consumed"]))
+                                   for o in r.get("materials") or []} if p else None,
+            **({"craft_at": f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"} if ctx.service else {}),
+            "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
+            "planner_link": gearset.encode_link(gd, lo, rid),
+            "notes": ["Odds follow the wiki's Quality Outcome mechanics with its standard quality weights; the game "
+                      "data has no per-recipe weights.",
+                      "Fine materials move every roll up one quality." if fine_materials else
+                      "Crafting with fine materials moves every roll up one quality (fine_materials=true).",
+                      *self._context_notes(ctx)],
+        }
 
     def steps_to_level(self, skill: str, level: int, activity: str | None = None, location: str | None = None,
                        pet: str | None = "auto") -> dict:

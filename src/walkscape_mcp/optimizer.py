@@ -9,8 +9,9 @@ from .engine import (
     GEAR_DEPENDENT_REQS, SLOT_ORDER, Context, Evaluation, Loadout, check_all, evaluate, gear_source,
     slot_type, static_sources, steps_per_item,
 )
-from .gamedata import QUALITIES, GameData
+from .gamedata import QUALITIES, QUALITY_NAMES, GameData
 from .player import OwnedItem, Player
+from .quality import at_least, quality_odds
 
 OBJECTIVES = {
     "item": "minimize expected steps per drop of `target` item (activity drop tables + 'chance to find' gear)",
@@ -32,6 +33,10 @@ class Objective:
     kind: str
     target: str | None = None
     targets: dict[str, int] | None = None  # "items": item id -> how many
+    # "quality": target is the minimum quality; the outcome is level_bonus + gear/service quality outcome
+    recipe_level: int = 0
+    level_bonus: float = 0.0
+    fine: bool = False
 
     def value(self, ev: Evaluation) -> float:
         """Lower is better."""
@@ -41,6 +46,10 @@ class Objective:
                 return steps_per_item(ev, self.target)
             case "fine_item":
                 return steps_per_item(ev, self.target, fine=True)
+            case "quality":
+                p = at_least(quality_odds(self.recipe_level, self.level_bonus + m["quality_outcome"], self.fine),
+                             self.target)
+                return m["steps_per_reward_roll"] / p if p > 0 else math.inf
             case "items":  # drops roll together, so the slowest item decides when you're done
                 return max(n * steps_per_item(ev, iid) for iid, n in self.targets.items())
             case "xp":
@@ -69,6 +78,8 @@ class Objective:
                 return f"{1 / v:.4f} XP/step"
             case "items":
                 return f"{v:,.0f} steps to get all of them"
+            case "quality":
+                return f"{v:,.0f} steps per item of at least {QUALITY_NAMES[self.target]} quality"
             case _:
                 return f"{v:,.1f} steps per unit"
 

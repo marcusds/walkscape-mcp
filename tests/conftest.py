@@ -21,3 +21,17 @@ def gd():
 @pytest.fixture(scope="session")
 def player(gd):
     return parse_save(gd, json.loads((FIXTURES / "save.json").read_text()))
+
+
+@pytest.fixture
+def svc(gd, player, tmp_path, monkeypatch):
+    """A Service on the fixture save with remembered info in tmp_path (no snapshot reload or background refresh)."""
+    from walkscape_mcp.service import Service
+    from walkscape_mcp.wiki import Wiki
+
+    monkeypatch.setattr("walkscape_mcp.service.player_info_file", lambda: tmp_path / "player_info.json")
+    svc = Service.__new__(Service)
+    svc._gd, svc._player, svc._not_met = gd, player, {}
+    svc._reload_snapshot = lambda: None
+    svc.wiki = Wiki()
+    return svc
