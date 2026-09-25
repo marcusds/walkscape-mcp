@@ -269,6 +269,12 @@ def describe_requirement(r: dict) -> str:
             s = f"{q.get('value')}+ achievement points"
         case "traveling":
             s = "while travelling"
+        case "itemAnywhere" | "itemAnywhereWithYou":
+            s = f"have {q.get('item')}" + (" with you" if t == "itemAnywhereWithYou" else "")
+        case "historyData":
+            s = f"{q.get('data') or q.get('category')} completed {q.get('value', 1)}+ times"
+        case "abilityAvailable":
+            s = f"gear with the {q.get('ability')} ability"
         case _:
             s = f"{t} {q}"
     return neg + s

@@ -19,7 +19,7 @@ Workflow:
 3. For "best loadout for X" requests call optimize_loadout. Map the user's goal to an objective:
 {chr(10).join(f"   - {k}: {v}" for k, v in OBJECTIVES.items())}
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
-4. For "where should I farm X" call rank_activities.
+4. For "where should I farm X" call rank_activities. For "how do I get to X" / travel gear, call plan_route.
 5. For mechanics/lore/anything not covered, use wiki_search + wiki_page.
 6. When the user mentions something about their character that the save export doesn't contain (how many times
    they've done an activity, travel steps, achievements, quests, unlocks), call remember_player_info so it persists.
@@ -199,6 +199,20 @@ def search_game_data(query: str, kind: str | None = None) -> list[dict]:
 def decode_gear_set(gear_set: str) -> dict:
     """Decode a gear set export string (from gear.walkscape.app) into items per slot."""
     return s().decode_gear_set(gear_set)
+
+
+@mcp.tool()
+def plan_route(start: str, destination: str, via: list[str] | None = None, avoid: list[str] | None = None,
+               pet: str | None = "auto", owned_only: bool = True) -> dict:
+    """Fastest travel route between two locations with the best travel gear for each leg.
+
+    Picks the route by steps with optimized gear (not base distance), skipping legs whose terrain requirements
+    (skis, diving gear, light sources, permits, agility level) the character can't meet.
+    via: locations to pass through in order (e.g. to compare an overland and an underwater route).
+    avoid: locations to route around.
+    Returns each leg with base and optimized steps, the gear whenever it changes (with planner_link), and the best
+    single loadout for the whole trip (planner_link and gear_set_export) for users who don't want to swap."""
+    return s().plan_route(start, destination, via, avoid, pet, owned_only)
 
 
 @mcp.tool()

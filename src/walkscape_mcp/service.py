@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import heapq
 import fcntl
 import json
 import math
@@ -15,7 +16,8 @@ from pathlib import Path
 
 from . import gearset, sync
 from .engine import (
-    GEAR_DEPENDENT_REQS, Context, Loadout, check_requirement, drop_report, evaluate, gear_source, history_key, slot_type,
+    GEAR_DEPENDENT_REQS, Context, Loadout, check_all, check_requirement, drop_report, evaluate, gear_source, history_key,
+    slot_type,
 )
 from .gamedata import QUALITIES, QUALITY_NAMES, GameData, describe_requirement, norm, strip_markup
 from .optimizer import OBJECTIVES, Objective, all_gear_pool, optimize, player_loadout, prepare, quick_score
@@ -852,6 +854,187 @@ class Service:
             out["notes"].append(
                 "Slots the objective left empty were filled with side benefits (tokens, chests, collectibles, "
                 f"fine materials, XP...) that cost nothing: {', '.join(SLOT_LABELS.get(s, s) for s in filled)}.")
+        return out
+
+    # ---------- travel ----------
+
+    def _route_graph(self) -> dict[str, list[tuple[str, dict]]]:
+        g: dict[str, list[tuple[str, dict]]] = {}
+        for r in self.gd.snap.get("routes") or []:
+            a, b = r["locations"]
+            g.setdefault(a, []).append((b, r))
+            g.setdefault(b, []).append((a, r))
+        return g
+
+    def _leg_modifiers(self, route: dict, origin: str) -> list[dict]:
+        """Terrain modifiers (required gear, items, levels) for travelling the route away from `origin`."""
+        mods = {t["id"]: t for t in self.gd.snap.get("terrain_modifiers") or []}
+        return [mods[t] for o in route.get("options") or [] if (o.get("options") or {}).get(origin)
+                for t in o.get("terrainModifiers") or [] if t in mods]
+
+    def _leg_context(self, origin: str, route: dict) -> Context:
+        """Travelling one leg is an activity whose work is a tenth of the distance (a route is 10 actions) and whose
+        requirements are the leg's terrain modifiers. Location-conditional gear uses the leg's starting location."""
+        ctx = self._context("travelling", origin)
+        ctx.activity = {**ctx.activity, "workRequired": route["distance"] / 10,
+                        "requirements": [r for m in self._leg_modifiers(route, origin) for r in m["requirements"]]}
+        return ctx
+
+    def _modifier_label(self, m: dict) -> str:
+        """e.g. "Jarvonian border check: have Jarvonian letter of passage with you"."""
+        name = m.get("name") or m["id"]
+        if "." in name:  # untranslated key like terrainmodifiers.singulars.requiresability.navigatedesert.name
+            name = m["id"].split(".")[-2]
+        reqs = []
+        for r in m["requirements"]:
+            q = r.get("requirement") or {}
+            text = describe_requirement(r)
+            for v in (q.get("item"), q.get("data")):
+                if v in self.gd.items or v in self.gd.activities:
+                    text = text.replace(v, self.gd.name(v) if v in self.gd.items else self.gd.activities[v]["name"])
+            reqs.append(text)
+        return f"{name}: {'; '.join(reqs)}" if reqs else name
+
+    def plan_route(self, start: str, destination: str, via: list[str] | None = None, avoid: list[str] | None = None,
+                   pet: str | None = "auto", owned_only: bool = True) -> dict:
+        gd = self.gd
+        stops = [gd.resolve(x, "location") for x in [start, *(via or []), destination]]
+        avoided = {gd.resolve(x, "location") for x in avoid or []}
+        graph = self._route_graph()
+        if owned_only and not self._player:
+            owned_only = False
+        pool = list(self._player.owned_gear.values()) if owned_only else all_gear_pool(gd)
+        pets = self._pet_options(pet)
+        obj = Objective("actions")  # a double action while travelling covers two of the route's 10 actions
+        gear_cache: dict[tuple, tuple] = {}  # (origin, terrain modifiers) -> (loadout, searcher)
+        legs_cache: dict[tuple[str, str], tuple | None] = {}
+        blocked: dict[str, list[str]] = {}
+
+        def leg(origin: str, route: dict):
+            """(steps, ctx, loadout) with the best gear for this leg, or None if the player can't travel it.
+            Gear depends on where the leg starts and its terrain, not its length, so it's optimized once per
+            (start, terrain) and the steps are evaluated per leg."""
+            key = (origin, route["id"])
+            if key not in legs_cache:
+                ctx = self._leg_context(origin, route)
+                reqs = ctx.activity["requirements"]
+                static = [r for r in reqs if r["type"] not in GEAR_DEPENDENT_REQS]
+                gkey = (origin, tuple(m["id"] for m in self._leg_modifiers(route, origin)))
+                if check_all(static, ctx, None) and gkey not in gear_cache:
+                    gear_cache[gkey] = optimize(ctx, obj, pool, pets, [None])
+                ev = evaluate(ctx, gear_cache[gkey][0], detail=False) if gkey in gear_cache else None
+                if ev is None or not ev.valid:
+                    legs_cache[key] = None
+                    blocked[route["name"]] = [self._modifier_label(m) for m in self._leg_modifiers(route, origin)]
+                else:
+                    legs_cache[key] = (leg_steps(ev), ctx, gear_cache[gkey][0])
+            return legs_cache[key]
+
+        def leg_steps(ev) -> float:
+            return round(ev.metrics["steps_per_action"] * 10)
+
+        def best_for(ctx, candidates) -> tuple[float, Loadout] | None:
+            """The search is local, so a loadout found for another leg sometimes beats this leg's own."""
+            best = None
+            for lo in candidates:
+                ev = evaluate(ctx, lo, detail=False)
+                if ev.valid and (best is None or leg_steps(ev) < best[0]):
+                    best = (leg_steps(ev), lo)
+            return best
+
+        def shortest(a: str, b: str) -> list[tuple[str, str, dict]]:
+            dist, prev, pq = {a: 0}, {}, [(0, a)]
+            while pq:
+                d, u = heapq.heappop(pq)
+                if u == b:
+                    break
+                if d > dist[u]:
+                    continue
+                for v, r in graph.get(u, []):
+                    if v in avoided and v != b:
+                        continue
+                    res = leg(u, r)
+                    if res and d + res[0] < dist.get(v, math.inf):
+                        dist[v], prev[v] = d + res[0], (u, r)
+                        heapq.heappush(pq, (dist[v], v))
+            if b not in dist:
+                raise ValueError(f"No usable route from {gd.locations[a]['name']} to {gd.locations[b]['name']}"
+                                 + (f". Blocked legs: {blocked}" if blocked else ""))
+            path, x = [], b
+            while x != a:
+                u, r = prev[x]
+                path.append((u, x, r))
+                x = u
+            return path[::-1]
+
+        path = [hop for a, b in zip(stops, stops[1:]) for hop in shortest(a, b)]
+        candidates = list({id(lo): lo for *_, lo in (leg(u, r) for u, _, r in path)}.values())
+        legs = []
+        for u, v, r in path:
+            ctx = leg(u, r)[1]
+            legs.append((u, v, r, *best_for(ctx, candidates), ctx))
+
+        # one loadout for the whole trip: the candidate that does best across every leg
+        best_single = None
+        for cand in candidates:
+            total = 0
+            for *_, ctx in legs:
+                ev = evaluate(ctx, cand, detail=False)
+                if not ev.valid:
+                    break
+                total += leg_steps(ev)
+            else:
+                if best_single is None or total < best_single[0]:
+                    best_single = (total, cand)
+
+        def items(lo: Loadout) -> list[str]:
+            return [gear_source(gd, oi).label for s, oi in lo.slots.items() if oi]
+
+        name = lambda lid: gd.locations[lid]["name"]
+        out: dict = {
+            "from": name(stops[0]), "to": name(stops[-1]),
+            "base_steps": sum(r["distance"] for _, _, r, *_ in legs),
+            "steps_swapping_gear_each_leg": sum(st for _, _, _, st, _, _ in legs),
+            "legs": [],
+        }
+        prev_items = None
+        for u, v, r, st, lo, ctx in legs:
+            row = {"leg": f"{name(u)} → {name(v)}", "base_steps": r["distance"], "steps": st}
+            if mods := self._leg_modifiers(r, u):
+                row["requires"] = [self._modifier_label(m) for m in mods]
+            cur = items(lo)
+            if cur != prev_items:
+                row["gear"] = cur
+                row["planner_link"] = gearset.encode_link(gd, lo, "travelling")
+            prev_items = cur
+            out["legs"].append(row)
+        if best_single:
+            total, lo = best_single
+            ctx = legs[0][5]
+            # fill free slots with side benefits (chests, tokens...) judged on the first leg
+            lo = next(se for lo2, se in gear_cache.values() if lo2 is lo).fill_empty(lo)
+            ev = evaluate(ctx, lo)
+            out["single_loadout"] = {
+                "steps": total,
+                "loadout": self._describe_loadout(ctx, lo, ev),
+                "pet": f"{gd.pets[lo.pet[0]]['name']} lvl {lo.pet[1]}" if lo.pet else None,
+                "planner_link": gearset.encode_link(gd, lo, "travelling"),
+            }
+            try:
+                out["single_loadout"]["gear_set_export"] = gearset.encode(gd, lo)
+            except Exception as e:
+                out["single_loadout"]["gear_set_export"] = f"(export failed: {e})"
+        else:
+            out["single_loadout"] = "No single loadout meets every leg's gear requirements; swap gear per leg."
+        if blocked:
+            out["legs_you_cannot_travel_yet"] = blocked
+        out["notes"] = [
+            "Steps follow the wiki's travel formula: distance / work efficiency, split into 10 actions, flat step "
+            "reductions per action, rounded up, minimum 10 steps per action.",
+            "Gear bonuses that depend on location (snowy, in Jarvonia...) are counted at each leg's starting location.",
+            "'gear' is shown on a leg only when it changes from the previous leg.",
+            "Steps are expected values: double action while travelling covers two of a route's 10 actions.",
+        ] + self._context_notes(legs[0][5])
         return out
 
     def _missing_upgrades(self, ctx, obj, pets, consumables, require_items, exclude, owned_score) -> dict:
