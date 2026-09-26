@@ -253,6 +253,8 @@ def describe_requirement(r: dict) -> str:
             s = f"with {q.get('quantity')}+ {'/'.join(q.get('keywords', []))} items equipped"
         case "keywordEquipped":
             s = f"with {q.get('keyword')} equipped"
+        case "distinctKeywordItemInInventory":
+            s = f"with {q.get('quantity')}+ {'/'.join(q.get('keywords', []))} items in the inventory"
         case "skillLevel":
             s = f"{q.get('skill')} lvl {q.get('level')}"
         case "characterLevel":

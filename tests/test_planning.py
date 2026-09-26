@@ -113,4 +113,17 @@ def test_steps_to_level_flags_activities_above_your_level(svc):
     out = svc.steps_to_level("hunting", 45, "Box trapping")
     if hunting < 40:
         assert "hunting lvl 40" in out["cannot_do_yet"]
-    assert out["uses_up_each_action"][0].startswith("one hunting trap item")
+    trap = out["inputs"][0]
+    assert trap["input"].startswith("one hunting trap item") and trap["need"] == out["completions"]
+    assert trap["get"]["item"] == "Boxtrap" and trap["get"]["steps"] == out["steps_getting_inputs"] > 0
+    assert out["total_steps"] == out["steps"] + out["steps_getting_inputs"]
+
+
+def test_rank_counts_the_inputs_used_up(svc):
+    from dataclasses import replace
+    svc._player = replace(svc._player, skill_xp={**svc._player.skill_xp, "hunting": 10**8})
+    out = svc.rank_activities("Basic hide", top=2, quantity=100, owned_only=False)
+    assert out["ranking"]
+    for r in out["ranking"]:
+        assert r["inputs"][0]["input"].startswith("one arrows item") and r["input_steps"] > 0
+        assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 100 + r["input_steps"], abs=10)

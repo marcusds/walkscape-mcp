@@ -81,6 +81,7 @@ class Player:
     carried_gear: dict[str, OwnedItem] = field(default_factory=dict)  # equipped + inventory (not the bank)
     gear_copies: dict[str, int] = field(default_factory=dict)  # key -> how many owned (two of a ring can be worn)
     carried_copies: dict[str, int] = field(default_factory=dict)  # key -> how many equipped + in the inventory
+    inventory_ids: set[str] = field(default_factory=set)  # every item in the inventory (not the bank)
 
     @property
     def skill_levels(self) -> dict[str, int]:
@@ -133,7 +134,7 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         owned[oi.key()] = oi
         return oi
 
-    equipped, carried, copies, carried_copies = {}, {}, {}, {}
+    equipped, carried, copies, carried_copies, inventory = {}, {}, {}, {}, set()
     for slot, raw in (save.get("gear") or {}).items():
         if raw:
             oi = add(raw)
@@ -147,6 +148,8 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
                 oi = add(raw, n)
                 if oi:
                     copies[oi.key()] = copies.get(oi.key(), 0) + n
+                if src == "inventory":
+                    inventory.add(split_quality(gd, raw)[0])
                 if oi and src == "inventory":
                     carried[oi.key()] = oi
                     carried_copies[oi.key()] = carried_copies.get(oi.key(), 0) + n
@@ -185,6 +188,7 @@ def parse_save(gd: GameData, save: dict | str) -> Player:
         carried_gear=carried,
         gear_copies=copies,
         carried_copies=carried_copies,
+        inventory_ids=inventory,
     )
 
 

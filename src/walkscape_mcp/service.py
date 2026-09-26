@@ -63,10 +63,14 @@ SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "f
 STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
 NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
 SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried")
+INPUT_CANDIDATES = 2  # input items (e.g. arrow types) costed when getting more; each runs plan_recipe
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
 
 class Service:
+    _supply_cache: dict | None = None  # see _input_supply
+    _supplying: frozenset[str] | set[str] = frozenset()
+
     def __init__(self):
         self._gd: GameData | None = None
         self._player: Player | None = None
@@ -376,11 +380,13 @@ class Service:
             return by_lower[close[0]]
         raise KeyError(f"No achievement matching {name!r}. Close matches: {[by_lower[c] for c in close]}")
 
-    def _context(self, activity_id: str, location_id: str | None) -> Context:
+    def _context(self, activity_id: str, location_id: str | None, carried_only: bool = False) -> Context:
         info = self._info()
         ctx = Context.for_player(self.gd, self._player, activity_id, location_id,
                                  history_met=info["history"], history_not_met=self._not_met,
                                  explored=set(info["explored"]))
+        if carried_only and self._player:  # away from a bank: only what's in the inventory now
+            ctx.inventory_ids = self._player.inventory_ids
         ctx.achievement_points_total = self._achievement_total()
         if activity_id in self.gd.recipes and location_id and (sv := self._recipe_service_at(activity_id, location_id)):
             # the service's bonuses count like gear; gear it needs (e.g. diving gear) becomes a requirement
@@ -1049,13 +1055,14 @@ class Service:
                        < r["requirement"].get("value", 0)]
         return ("assumed", labels) if unconfirmed else ("visible", labels)
 
-    def _activity_inputs(self, aid: str) -> list[str]:
-        """What an activity uses up each action (arrows, traps, plants...) and what the character has of it."""
+    def _input_options(self, aid: str) -> list[tuple[str, list[str], int]]:
+        """What an activity uses up each action: (description, items that fit, how many per action)."""
         gd, out = self.gd, []
         for opt in gd.activity_like(aid).get("options") or []:
             for inp in opt.get("inputs") or []:
+                n = inp.get("quantity", 1)
                 if inp.get("type") == "specific":
-                    ids, need = [inp["item"]], f"{inp.get('quantity', 1)}x {gd.name(inp['item'])}"
+                    ids, need = [inp["item"]], f"{n}x {gd.name(inp['item'])}"
                 else:
                     kw = inp.get("keyword")
                     ids = [k for k, i in gd.items.items() if kw in (i.get("keywords") or [])]
@@ -1064,16 +1071,88 @@ class Service:
                 ids = [i for i in ids if all(input_fits(gd, i, r) for r in reqs if r["type"] == "inputKeywordWithLevel")]
                 if reqs:
                     need += f" ({'; '.join(describe_requirement(r) for r in reqs)})"
-                if self._player:
-                    have = [f"{gd.name(i)} ({self._have(i)})" for i in ids if sum(self._player.item_counts.get(i, (0, 0)))]
-                    need += f"; you have: {', '.join(have) if have else 'none'}"
-                out.append(need)
+                out.append((need, ids, n))
         return out
+
+    def _activity_inputs(self, aid: str) -> list[str]:
+        """What an activity uses up each action (arrows, traps, plants...) and what the character has of it."""
+        gd, out = self.gd, []
+        for need, ids, _ in self._input_options(aid):
+            if self._player:
+                have = [f"{gd.name(i)} ({self._have(i)})" for i in ids if sum(self._player.item_counts.get(i, (0, 0)))]
+                need += f"; you have: {', '.join(have) if have else 'none'}"
+            out.append(need)
+        return out
+
+    def _supply_steps(self, item_id: str, count: int, near: str | None, pet: str | None) -> dict | None:
+        """Cheapest way to get `count` more of an item: farming it (rank_activities) or crafting it (plan_recipe,
+        which also farms the missing materials). None if the character can't get it either way."""
+        key, cache, busy = (item_id, count, near, pet), self._supply_cache, self._supplying
+        if key in cache:
+            return cache[key]
+        if item_id in busy:  # e.g. an input whose recipe needs a material only an activity using that input drops
+            return None
+        busy.add(item_id)
+        try:
+            gd, opts = self.gd, []
+            farmable = any(x["kind"] == "activity" for x in gd.item_sources.get(item_id, []))
+            ranked = (self.rank_activities(item_id, top=1, pet=pet, near=near, drops_only=True)["ranking"]
+                      if farmable else [])
+            if ranked:
+                opts.append({"how": f"{ranked[0]['activity']} @ {ranked[0]['location']}",
+                             "steps": round(ranked[0]["steps_per_item"] * count)})
+            for src in gd.item_sources.get(item_id, []):
+                if src["kind"] != "recipe":
+                    continue
+                probe = self._context(src["id"], None)
+                if self._player and probe.skill_levels.get(probe.main_skill, 1) < probe.required_level:
+                    continue
+                plan = self.plan_recipe(src["id"], count, near, pet)
+                opts.append({"how": f"craft ({plan['recipe']})", "steps": plan["total_steps"]})
+            best = min(opts, key=lambda o: o["steps"]) if opts else None
+        finally:
+            busy.discard(item_id)
+        cache[key] = best
+        return best
+
+    def _input_supply(self, aid: str, actions: int, near: str | None = None, pet: str | None = "auto") -> dict:
+        """Inputs `actions` actions use up, what the character has, and the steps to get the rest."""
+        outer = self._supply_cache is None  # cache only for this call: the character may change between calls
+        if outer:
+            self._supply_cache, self._supplying = {}, set()
+        try:
+            return self._input_supply_rows(aid, actions, near, pet)
+        finally:
+            if outer:
+                self._supply_cache = None
+
+    def _input_supply_rows(self, aid: str, actions: int, near: str | None, pet: str | None) -> dict:
+        gd, rows, total = self.gd, [], 0
+        for need, ids, n in self._input_options(aid):
+            want = actions * n
+            have = {i: sum(self._player.item_counts.get(i, (0, 0))) for i in ids} if self._player else {}
+            short = max(0, want - sum(have.values()))
+            row = {"input": need, "need": want, "have": sum(have.values()), "short": short}
+            if short:
+                # the lowest-level inputs (copper arrows over iron) are the cheap ones; only plan those
+                cheap = sorted(ids, key=lambda i: max([self._context(x["id"], None).required_level
+                                                       for x in gd.item_sources.get(i, []) if x["kind"] == "recipe"]
+                                                      or [0]))[:INPUT_CANDIDATES]
+                got = [(g, i) for i in cheap if (g := self._supply_steps(i, short, near, pet))]
+                if got:
+                    g, i = min(got, key=lambda x: x[0]["steps"])
+                    row["get"] = {"item": gd.name(i), **g}
+                    total += g["steps"]
+                else:
+                    row["get"] = None
+            rows.append(row)
+        return {"inputs": rows, "steps": total}
 
     def _context_notes(self, ctx: Context) -> list[str]:
         notes = []
         if inputs := self._activity_inputs(ctx.activity_id):
-            notes.append(f"Uses up each action (not counted in steps): {' | '.join(inputs)}.")
+            notes.append(f"Uses up each action (steps_to_level and rank_activities with a quantity count getting "
+                         f"more): {' | '.join(inputs)}.")
         status, unlock = self._visibility(ctx)
         if status == "hidden":
             notes.append(f"HIDDEN ACTIVITY: not visible in-game until {'; '.join(unlock)}.")
@@ -1116,7 +1195,7 @@ class Service:
 
         results = []
         for loc in self._locations_for(aid, location):
-            ctx = self._context(aid, loc)
+            ctx = self._context(aid, loc, carried_only)
             start, locked = self._start_and_locks(ctx, require_items or [], owned_only, pets, consumables)
             lo, searcher = optimize(ctx, obj, pool, pets, consumables, start=start, locked=locked, exclude=exclude)
             results.append((searcher.score(lo), loc, ctx, lo, searcher, start))
@@ -1465,9 +1544,11 @@ class Service:
     def rank_activities(self, target: str | None = None, top: int = 10, pet: str | None = "current",
                         consumable: str | None = "none", owned_only: bool = True,
                         targets: dict[str, int] | None = None, near: str | None = None,
-                        quantity: int | None = None, fine: bool = False, carried_only: bool = False) -> dict:
+                        quantity: int | None = None, fine: bool = False, carried_only: bool = False,
+                        drops_only: bool = False) -> dict:
         """Which activity/location gives the target item(s) in the fewest steps with your best owned loadout,
-        optionally counting the trip there from `near` (default: the remembered current location)."""
+        optionally counting the trip there from `near` (default: the remembered current location).
+        drops_only: skip 'chance to find' gear, which would rank every activity in the game."""
         gd = self.gd
         if targets:
             obj = self._objective("items", None, targets)
@@ -1480,7 +1561,7 @@ class Service:
         pets = self._pet_options(pet)
         consumables = self._consumable_options(consumable)
         srcs = [x for t in tids for x in gd.item_sources.get(t, [])]
-        special = any(x["kind"] == "gear_special" for x in srcs)
+        special = not drops_only and any(x["kind"] == "gear_special" for x in srcs)
         acts = [x["id"] for x in srcs if x["kind"] == "activity"]
         if special:
             acts = list(gd.activities)
@@ -1488,7 +1569,7 @@ class Service:
         cands, blocked, hidden_until = [], [], {}
         for aid in dict.fromkeys(a for a in acts if a != "travelling"):  # travel steps depend on the route
             for loc in gd.activity_locations(aid) or [None]:
-                ctx = self._context(aid, loc)
+                ctx = self._context(aid, loc, carried_only)
                 if self._player and ctx.skill_levels.get(ctx.main_skill, 0) < ctx.required_level:
                     if not special:  # every activity is a source of "chance to find" items; don't list them all
                         blocked.append((ctx, loc, [f"{ctx.main_skill} lvl {ctx.required_level} "
@@ -1519,27 +1600,36 @@ class Service:
             lo = searcher.run(start)
             sc = searcher.score(lo)
             if sc[0] == 0 and not math.isinf(sc[1]):
-                rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None))
+                rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None, ctx, lo))
             elif sc[0] and not special:
                 blocked.append((ctx, loc, evaluate(ctx, lo).unmet_activity_requirements))
-        rows.sort()
+        rows.sort(key=lambda r: r[:3])
         src = self._near(near)
         dist = self._base_distances(src)[0] if src else {}
         loc_id = {v["name"]: k for k, v in gd.locations.items()}
         per_unit = "steps_to_get_all" if targets else "steps_per_fine_item" if fine else "steps_per_item"
 
-        def row(v, a, l):
+        def row(v, a, l, ctx, lo):
             r = {"activity": a, "location": l, per_unit: round(v, 1)}
             if (a, l) in hidden_until:
                 r["hidden_activity"] = f"only visible after {'; '.join(hidden_until[(a, l)])} (assumed done)"
             if src:
                 r["travel_steps"] = dist.get(loc_id.get(l), math.inf) if l else 0
+            if self._input_options(ctx.activity_id):
+                actions = v / evaluate(ctx, lo).metrics["steps_per_action"]
+                r["actions_per_item" if not targets else "actions"] = round(actions, 2)
                 if quantity or targets:
-                    r["total_steps"] = round(r["travel_steps"] + v * (quantity or 1))
+                    sup = self._input_supply(ctx.activity_id, math.ceil(actions * (quantity or 1)),
+                                             src, pet)
+                    r["inputs"], r["input_steps"] = sup["inputs"], sup["steps"]
+                else:
+                    r["uses_up_each_action"] = self._activity_inputs(ctx.activity_id)
+            if quantity or targets:
+                r["total_steps"] = round(r.get("travel_steps", 0) + v * (quantity or 1) + r.get("input_steps", 0))
             return r
 
         ranked = [row(*r) for r in rows]
-        if src and (quantity or targets):
+        if quantity or targets:
             ranked.sort(key=lambda r: r["total_steps"])
         elif src and ranked:  # when a closer source pays off against the fastest one
             best = ranked[0]
@@ -1556,8 +1646,10 @@ class Service:
         }
         if src:
             out["from"] = gd.locations[src]["name"]
-            out["note"] += (" travel_steps is base route distance from 'from' (plan_route has it with travel gear)"
-                            + ("; total_steps adds the farming." if quantity or targets else "."))
+            out["note"] += " travel_steps is base route distance from 'from' (plan_route has it with travel gear)."
+        if quantity or targets:
+            out["note"] += (" total_steps adds up the farming" + (", travel" if src else "")
+                            + " and getting any inputs (arrows, traps...) beyond what you have.")
         if self._player:
             out["you_have"] = {gd.name(t): self._have(t) for t in tids} if targets else self._have(tids[0])
         if blocked:
@@ -1576,7 +1668,7 @@ class Service:
         pets = self._pet_options(pet)
         best = None
         for loc in self._locations_for(aid, location):
-            ctx = self._context(aid, loc)
+            ctx = self._context(aid, loc, carried_only)
             start, locked = self._start_and_locks(ctx, [], bool(self._player), pets, [None])
             lo, searcher = optimize(ctx, obj, pool, pets, [None], start=start, locked=locked)
             sc = searcher.score(lo)
@@ -1728,8 +1820,11 @@ class Service:
             if unmet:
                 out["cannot_do_yet"] = (f"{ctx.activity['name']} needs {'; '.join(unmet)}. The steps above assume you "
                                         "could do it now; train on something you meet first.")
-            if inputs := self._activity_inputs(aid):
-                out["uses_up_each_action"] = inputs
+            if self._input_options(aid):
+                sup = self._input_supply(aid, out["completions"], pet=pet)
+                out["inputs"] = sup["inputs"]
+                out["steps_getting_inputs"] = sup["steps"]
+                out["total_steps"] = out["steps"] + sup["steps"]
         return out
 
     def inventory_fill(self, activity: str, free_slots: int, location: str | None = None,

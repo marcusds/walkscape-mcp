@@ -37,10 +37,10 @@ HANDLED_REQUIREMENT_TYPES = {
     "totalSkillLevel", "totalSkillLevelUps", "activityType", "traveling", "gameData", "itemAnywhere",
     "itemAnywhereWithYou", "collectiblesOwned", "totalWealth", "historyData", "exploreRealm",
     "distinctKeywordItemsEquipped", "keywordEquipped", "itemEquipped", "abilityAvailable", "keywordWithLevelEquipped",
-    "service", "skillTypeLevel", "inputKeywordWithLevel",
+    "service", "skillTypeLevel", "inputKeywordWithLevel", "distinctKeywordItemInInventory",
 }
 # Known but deliberately approximated (assumed satisfied and reported in notes)
-APPROXIMATED_REQUIREMENT_TYPES = {"distinctKeywordItemInInventory"}
+APPROXIMATED_REQUIREMENT_TYPES: set[str] = set()
 HANDLED_STAT_TYPES = {
     "workEfficiency", "doubleRewards", "chestFind", "fineMaterialFind", "doubleAction", "noMaterialsConsumed",
     "qualityOutcome", "bonusExperience", "rollSpecialTable", "stepsRequired", "findCollectibles", "findBirdNests",
@@ -77,6 +77,8 @@ class Context:
     explored: set[str] = field(default_factory=set)  # regions the user said they've fully explored
     service: dict | None = None  # recipes: the crafting service used ({"id", "name", "attrs", ...})
     achievement_points_total: int | None = None  # all achievement points in the game, for "50% of points" checks
+    # items that can be in the inventory (owned, or only what's carried when away from a bank); None = anything
+    inventory_ids: set[str] | None = None
     assume_unknown_true: bool = True
 
     def __post_init__(self):
@@ -114,6 +116,7 @@ class Context:
             achievement_points=player.achievement_points,
             reputation=player.reputation,
             owned_ids=player.all_item_ids,
+            inventory_ids=player.all_item_ids,
             collectibles=player.collectibles,
             coins=player.coins,
             **hist,
@@ -219,8 +222,12 @@ def check_requirement(r: dict, ctx: Context, eq: Equipped | None) -> bool:
         case "inputKeywordWithLevel":
             # only meaningful for a specific input item; see input_fits
             ok = True
+        case "distinctKeywordItemInInventory":
+            # e.g. a quiver's bonus needs arrows in the inventory; anything owned can be taken from the bank
+            ok = ctx.inventory_ids is None or all(
+                sum(kw in (ctx.gd.items.get(i, {}).get("keywords") or []) for i in ctx.inventory_ids)
+                >= q.get("quantity", 1) for kw in q.get("keywords") or [])
         case _:
-            # skillTypeLevel, inputKeywordWithLevel, distinctKeywordItemInInventory, ... not modelled
             ctx.unverified.add(t)
             ok = ctx.assume_unknown_true
     return not ok if r.get("opposite") else ok

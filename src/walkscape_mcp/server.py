@@ -200,7 +200,8 @@ def rank_activities(target: str | None = None, top: int = 10, pet: str | None = 
       you have all of them.
     near: where the player starts (default: remembered current location). Each row then gets travel_steps, and
       rows that are closer but slower say below how many items they beat the fastest.
-    quantity: how many of `target` are wanted; with a start location, ranks by travel + farming steps.
+    quantity: how many of `target` are wanted; ranks by total_steps: farming, travel from a start location, and
+      getting the inputs (arrows, traps) an activity uses up beyond what the character has.
     fine: rank by steps per fine version of `target` (fine material finding gear) instead.
     carried_only: only gear that's equipped or in the inventory, for when the player isn't at a bank.
     Also returns how many the character has, sources they can't use yet with the unmet requirements, and
@@ -290,7 +291,8 @@ def craft_quality(recipe: str, quality: str = "Perfect", fine_materials: bool = 
 def steps_to_level(skill: str, level: int, activity: str | None = None, location: str | None = None,
                    pet: str | None = "auto") -> dict:
     """XP the character needs to reach `level` in `skill`; with an activity or recipe, also the steps and
-    completions to get there using the best owned XP loadout."""
+    completions to get there using the best owned XP loadout. For activities that use up inputs (arrows, traps),
+    total_steps adds farming or crafting the ones the character is short of."""
     return s().steps_to_level(skill, level, activity, location, pet)
 
 

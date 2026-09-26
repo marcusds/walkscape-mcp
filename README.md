@@ -68,6 +68,8 @@ The step and drop formulas are ported from the official planner's optimiser work
 - Hidden activities (e.g. Summer cave foraging after Spring bat tracking) are checked against remembered action history and flagged or skipped.
 - Level-scaled loot: rows with a level requirement (most fish) are absent below it and grow linearly to full weight between their min and max scaling levels, rounded to 0.1 while scaling; fish XP bonuses add to XP per step. Fitted to the wiki's per-level fishing tables.
 - Skill-type requirements ("55% towards maximum Gathering level"): levels gained above 1 across that type's skills, over 98 per skill.
+- Activity inputs (arrows, traps, plants, nets): one per action. `steps_to_level` and `rank_activities` with a quantity add the steps to get the ones you're short of: farming them or crafting them (`plan_recipe`, which farms missing materials), whichever is cheaper, trying the two lowest-level items that fit. Optimized gear doesn't change what an action uses up, so `optimize_loadout` only lists them.
+- "Items in the inventory" requirements (e.g. a quiver's bonus needs arrows with you): met by anything you own, since you can take it from the bank; with `carried_only`, only by what's in the inventory.
 
 The optimizer builds a loadout greedily, then hill-climbs one slot at a time, including the pet and consumable. It also seeds each set bonus so multi-piece sets get a fair trial.
 
@@ -75,8 +77,8 @@ Afterwards, any slot the objective left empty is filled with gear that adds side
 
 ### Not modelled
 
-- The cost of activity inputs (arrows, traps, plants, bait). Activities that use them up list what they need and what you have, but the steps to get more aren't counted.
-- `distinctKeywordItemInInventory` (e.g. arrows in the inventory for a bow bonus) is assumed satisfied and reported in `notes`.
+- Whether double actions or "no materials consumed" save inputs: every action is assumed to use one.
+- `plan_recipe` farms a missing material directly; it doesn't consider crafting it (planks from logs, for example), so crafted inputs can come out dearer than they are.
 
 ## Keeping it up to date
 

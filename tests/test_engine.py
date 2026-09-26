@@ -137,6 +137,14 @@ def test_skill_type_level_matches_wiki_thresholds(gd):
     assert skill_type_progress(gd, levels, "gathering") < 0.55
 
 
+def test_arrows_in_inventory_requirement(gd):
+    from walkscape_mcp.engine import check_requirement
+    r = {"type": "distinctKeywordItemInInventory", "requirement": {"quantity": 1, "keywords": ["arrows"]}}
+    assert check_requirement(r, Context(gd, "deer_hunting", None, {}), None)  # no character: anything goes
+    assert check_requirement(r, Context(gd, "deer_hunting", None, {}, inventory_ids={"copper_arrows"}), None)
+    assert not check_requirement(r, Context(gd, "deer_hunting", None, {}, inventory_ids={"birch_logs"}), None)
+
+
 def test_activity_inputs_are_reported(svc):
     inputs = svc.activity_info("Alligator hunting")["inputs_used_each_action"]
     assert inputs[0].startswith("one arrows item (input for hunting lvl 30+)")
