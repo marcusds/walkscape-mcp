@@ -237,7 +237,11 @@ class Service:
                               if la.get(sk, 1) != lb.get(sk, 1) else lb.get(sk, 1)}
 
         def counts(p):
-            return {k: n + f for k, (n, f) in p.item_counts.items()}
+            """Bank + inventory + equipped, so swapping gear on or off isn't a gain or loss."""
+            c = {k: n + f for k, (n, f) in p.item_counts.items()}
+            for oi in p.equipped.values():
+                c[oi.id] = c.get(oi.id, 0) + 1
+            return c
 
         ca, cb = counts(pa), counts(pb)
         changes = {gd.name(k): cb.get(k, 0) - ca.get(k, 0) for k in set(ca) | set(cb) if cb.get(k, 0) != ca.get(k, 0)}

@@ -177,9 +177,13 @@ def test_save_history_and_compare(loading_svc, tmp_path, monkeypatch):
     later["steps"] += 5000
     later["skills"]["foraging"] = later["skills"].get("foraging", 0) + 1234
     later["collectibles"] = [*later.get("collectibles", []), "petrified_branch"]
+    slot, worn = next((s, i) for s, i in later["gear"].items() if i)
+    later["gear"][slot] = None  # unequipping into the inventory isn't a loss
+    later.setdefault("inventory", {})[worn] = later["inventory"].get(worn, 0) + 1
     svc.load_save(json.dumps(later))
     svc.load_save(json.dumps(later))  # the same export again isn't stored twice
     out = svc.compare_saves()
     assert out["steps"] == 5000 and len(out["saves"]) == 2
     assert out["skills"]["foraging"]["xp_gained"] == 1234
     assert out["collectibles_found"] == ["Petrified branch"]
+    assert not out["items_used_or_lost"] and "items_gained" in out
