@@ -106,3 +106,11 @@ def test_rounding_noise_does_not_leave_slots_empty():
 
     assert not _worse((0, 97499.99999999993), (0, 97499.99999999991))
     assert _worse((0, 97500.1), (0, 97499.9)) and _worse((1, 1.0), (0, 2.0))
+
+
+def test_steps_to_level_flags_activities_above_your_level(svc):
+    hunting = svc._player.skill_levels.get("hunting", 1)
+    out = svc.steps_to_level("hunting", 45, "Box trapping")
+    if hunting < 40:
+        assert "hunting lvl 40" in out["cannot_do_yet"]
+    assert out["uses_up_each_action"][0].startswith("one hunting trap item")

@@ -1722,6 +1722,14 @@ class Service:
             })
             if ctx.is_recipe:
                 out["note"] = "For a recipe, completions is how many crafts; plan_recipe gives the materials."
+            unmet = [self._req_text(r) for r in ctx.activity.get("requirements") or []
+                     if r["type"] not in GEAR_DEPENDENT_REQS and r["type"] != "service"
+                     and not check_requirement(r, ctx, None)]
+            if unmet:
+                out["cannot_do_yet"] = (f"{ctx.activity['name']} needs {'; '.join(unmet)}. The steps above assume you "
+                                        "could do it now; train on something you meet first.")
+            if inputs := self._activity_inputs(aid):
+                out["uses_up_each_action"] = inputs
         return out
 
     def inventory_fill(self, activity: str, free_slots: int, location: str | None = None,
