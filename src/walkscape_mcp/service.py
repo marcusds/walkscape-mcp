@@ -1774,6 +1774,16 @@ class Service:
         return ctx, lo, evaluate(ctx, lo)
 
     def plan_recipe(self, recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
+        outer = self._supply_cache is None  # _supply_steps may plan sub-recipes; share one cache per top-level call
+        if outer:
+            self._supply_cache, self._supplying = {}, set()
+        try:
+            return self._plan_recipe(recipe, count, near, pet)
+        finally:
+            if outer:
+                self._supply_cache = None
+
+    def _plan_recipe(self, recipe: str, count: int, near: str | None, pet: str | None) -> dict:
         gd = self.gd
         _, rid = self._resolve_any(recipe, ["recipe"])
         r = gd.recipes[rid]
@@ -1783,8 +1793,9 @@ class Service:
         per_completion = out_n * (1 + m["double_rewards"])
         completions = math.ceil(count / per_completion)
         steps = round(completions * m["steps_per_action"])  # a double action is a free extra completion
-        materials, gather_total = [], 0
+        materials, gather_total, missing = [], 0, []
         src = self._near(near)
+        near_name = gd.locations[src]["name"] if src else None
         for group in r.get("materials") or []:
             opts = group["options"]
             rows = []
@@ -1793,19 +1804,26 @@ class Service:
                 have = sum(self._player.item_counts.get(o["item"], (0, 0))) if self._player else 0
                 rows.append({"item": gd.name(o["item"]), "id": o["item"], "need": need, "have": have,
                              "short": max(0, need - have)})
-            pick = next((x for x in rows if not x["short"]), rows[0])
-            if len(rows) > 1:
-                pick["alternatives"] = [x["item"] for x in rows if x is not pick]
-            if pick["short"]:
-                ranked = self.rank_activities(pick["id"], top=1, pet=pet, near=gd.locations[src]["name"] if src else None,
-                                              quantity=pick["short"])
-                if ranked["ranking"]:
+            pick = next((x for x in rows if not x["short"]), None)
+            if pick is None:  # every option is short: take the cheapest one to farm or craft
+                supply = {x["item"]: self._supply_steps(x["id"], x["short"], near_name, pet) for x in rows}
+                pick = min(rows, key=lambda x: supply[x["item"]]["steps"] if supply[x["item"]] else math.inf)
+                how = supply[pick["item"]]
+                if how is None:
+                    pick["gather"] = {"cannot_get": "no activity drops it and no recipe you can make yields it",
+                                      "other_sources": self._sources(pick["id"], 10)}
+                    missing.append(pick["item"])
+                elif how["how"].startswith("craft"):
+                    pick["gather"] = {"craft": how["how"][7:-1], "steps_for_shortfall": how["steps"]}
+                    gather_total += how["steps"]
+                else:
+                    ranked = self.rank_activities(pick["id"], top=1, pet=pet, near=near_name, quantity=pick["short"])
                     best = ranked["ranking"][0]
                     farm = round(best["steps_per_item"] * pick["short"])
                     pick["gather"] = {**best, "steps_for_shortfall": farm}
                     gather_total += farm
-                else:
-                    pick["gather"] = {"other_sources": ranked.get("other_sources", [])}
+            if len(rows) > 1:
+                pick["alternatives"] = [x["item"] for x in rows if x is not pick]
             del pick["id"]
             materials.append(pick)
         out = {
@@ -1813,6 +1831,8 @@ class Service:
             "completions": completions, "crafting_steps": steps, "materials": materials,
             **({"craft_at": f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"} if ctx.service else {}),
             "steps_gathering_shortfall": gather_total, "total_steps": steps + gather_total,
+            **({"total_steps_leaves_out": f"{', '.join(missing)}: you can't farm or craft it yet, so the plan "
+                                          "can't be completed as is"} if missing else {}),
             "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
             "planner_link": gearset.encode_link(gd, lo, rid),
             "metrics": {k: m[k] for k in ("steps_per_completion", "double_action", "double_rewards",

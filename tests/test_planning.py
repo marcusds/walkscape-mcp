@@ -146,3 +146,12 @@ def test_find_buildings(svc):
     assert "Polar Pruning (Barber)" in svc.location_info("Azurazera")["buildings"]
     assert svc.find_services("job board", near="Kallaheim", top=1)["locations"][0]["location"] == "Kallaheim"
     assert svc.service_table()["heatstroke_metalworks_advanced"]["kind"] == "forge"
+
+
+def test_plan_recipe_crafts_or_flags_the_shortfall(svc):
+    # crab rolls need bread (crafted from wheat) and raw crab (no activity drops it at these levels)
+    out = svc.plan_recipe("Make crab rolls", 200)
+    mats = {m["item"]: m for m in out["materials"]}
+    assert mats["Bread"]["gather"]["craft"] == "Bake bread" and mats["Bread"]["gather"]["steps_for_shortfall"] > 0
+    assert "cannot_get" in mats["Raw crab"]["gather"] and "Raw crab" in out["total_steps_leaves_out"]
+    assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"]

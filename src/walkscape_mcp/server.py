@@ -275,8 +275,10 @@ def find_services(service: str, near: str | None = None, top: int = 5) -> dict:
 @mcp.tool()
 def plan_recipe(recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
     """Plan crafting `count` of a recipe's output: crafts needed and steps with the best owned loadout, each
-    material needed vs owned, and for any shortfall the best place to gather it and the steps. Also the nearest
-    location with the required service (from `near`, default the remembered current location)."""
+    material needed vs owned, and for any shortfall the cheaper of farming it (best place, steps) or crafting it
+    (its own plan, materials included). A shortfall the character can't farm or craft yet is listed with its other
+    sources and named in total_steps_leaves_out. Also the nearest location with the required service (from `near`,
+    default the remembered current location)."""
     return s().plan_recipe(recipe, count, near, pet)
 
 
