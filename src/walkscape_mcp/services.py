@@ -82,6 +82,12 @@ def parse_requirements(text: str) -> list[dict]:
                          "requirement": {"amount": int(m[1].replace(",", ""))}})
         elif m := re.fullmatch(r"Have \[([\d,.]+)\] ([\w ]+?) faction reputation\.", part):
             reqs.append(_reputation_req(m[1], m[2]))
+        elif m := re.fullmatch(r"Have \[([\d,]+)\] achievement points\.", part):
+            reqs.append({"type": "achievementPoint", "opposite": False,
+                         "requirement": {"value": int(m[1].replace(",", "")), "isPercentage": False}})
+        elif m := re.fullmatch(r"Complete actions of the (.+?) activity\. \[([\d,]+)\]", part):
+            reqs.append({"type": "historyData", "opposite": False, "requirement": {
+                "category": "actionCompleted", "data": norm(m[1]), "value": int(m[2].replace(",", ""))}})
         else:
             unparsed.append(part)
     return reqs + ([{"type": "unparsed", "opposite": False, "requirement": {"text": " ".join(unparsed)}}]
@@ -102,3 +108,37 @@ def parse_services_page(text: str) -> dict[str, dict]:
             "requirements": parse_requirements(m["reqs"]),
         }
     return out
+
+
+def parse_buildings_page(text: str) -> dict[str, dict]:
+    """Building name -> {types, actions: {action: note}} from the wiki's Buildings page, which lists buildings
+    under "Buildings by Type" (Bank, Tavern, ...) and "Buildings by Action" (Buy items, Withdraw, ...) headings."""
+    out: dict[str, dict] = {}
+    section = heading = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s in ("Buildings by Type", "Buildings by Action"):
+            section, heading = s, None
+        elif section and "|" not in s and s:
+            heading = None if s.startswith("This page") else s
+        elif section and heading and "|" in s:
+            cells = [c.strip() for c in s.split("|")]
+            if cells[0] == "Building Name":
+                continue
+            b = out.setdefault(cells[0], {"types": [], "actions": {}})
+            if section == "Buildings by Type":
+                b["types"].append(heading)
+            else:
+                b["actions"][heading] = cells[3] if len(cells) > 3 else ""
+    return out
+
+
+def parse_building_requirements(page: str) -> list[dict]:
+    """Entry requirements from a building's wiki page ("This building can only be entered if the following
+    requirement has been met: Have [150] Jarvonia faction reputation.")."""
+    i = page.find("can only be entered if")
+    if i < 0:
+        return []
+    text = " ".join(line.strip() for line in page[page.find(":", i) + 1:].splitlines()[:15] if line.strip())
+    m = re.match(r"((?:(?:(?:Have|At least|Requires)[^.]*\.|Complete actions of the [^.]*\. \[[\d,]+\])\s*)+)", text)
+    return parse_requirements(m[1]) if m else [{"type": "unparsed", "opposite": False, "requirement": {"text": text[:120]}}]

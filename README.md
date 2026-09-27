@@ -41,7 +41,7 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `evaluate_loadout` | Stats, steps and drop rates for your current gear or a gear-set string |
 | `rank_activities` | Where to farm an item (or its fine version, or several items at once) in the fewest steps, optionally counting travel from where you are |
 | `plan_route` | Fastest route between locations with the best travel gear per leg, respecting terrain requirements |
-| `find_services` | Nearest sawmills, kitchens, forges... with each service's bonuses and requirements |
+| `find_services` | Nearest sawmills, kitchens, forges... with each service's bonuses and requirements, and nearest banks, shops, taverns and job boards |
 | `plan_recipe` | Crafting N of something: crafts, steps, materials vs owned, where to gather the shortfall |
 | `craft_quality` | Odds of each crafted quality and the best loadout/service for a target quality |
 | `steps_to_level` | XP and steps to reach a level with an activity |

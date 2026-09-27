@@ -157,3 +157,10 @@ def test_pet_eggs_ignore_double_action_and_rewards(gd, player):
     ev = evaluate(ctx, player_loadout(player))
     # wiki: 1 in 2,000 actions, whatever double action/rewards the gear has
     assert steps_per_item(ev, "reindeer_egg") == pytest.approx(ev.metrics["steps_per_completion"] * 2000, rel=1e-6)
+
+
+def test_get_item_lists_a_keywords_items(svc):
+    out = svc.item_info("Light source")
+    assert out["keyword"] == "Light source" and "Simple torch" in out["items"]
+    assert set(out["you_own"]) <= set(out["items"])
+    assert svc.item_info("Simple torch")["name"] == "Simple torch"

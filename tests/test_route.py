@@ -33,5 +33,5 @@ def test_find_services_ranks_by_distance(svc):
     assert any("diving" in x for x in vastalume["route_requires"])
     here = svc.find_services("kitchen", "Everhaven")["locations"][0]
     assert here["location"] == "Everhaven" and here["base_steps"] == 0 and "route" not in here
-    with pytest.raises(KeyError, match="Kinds"):
+    with pytest.raises(KeyError, match="Buildings"):
         svc.find_services("spaceport", "Everhaven")

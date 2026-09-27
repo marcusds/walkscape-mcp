@@ -226,7 +226,8 @@ def get_activity(name: str) -> dict:
 
 @mcp.tool()
 def get_location(name: str) -> dict:
-    """Location details: faction/region, keywords (e.g. desert, underwater), activities and services."""
+    """Location details: faction/region, keywords (e.g. desert, underwater), activities, services, buildings
+    (banks, shops, taverns...) and whether it has a job board."""
     return s().location_info(name)
 
 
@@ -262,8 +263,10 @@ def plan_route(destination: str, start: str | None = None, via: list[str] | None
 @mcp.tool()
 def find_services(service: str, near: str | None = None, top: int = 5) -> dict:
     """Nearest locations with a service (sawmill, kitchen, forge, loom, workshop, trinketry bench, mailbox,
-    wardrobe...) or a named one ("Cursed forge"), ranked by base travel steps from `near`. Each row lists the
-    services there (with tier; recipes need basic or advanced), the route, and terrain the route requires.
+    wardrobe...), a building (bank, tavern, general store, shop, barber, outpost...), something you can do at a
+    building (withdraw, deposit, buy, sell, rumours), a job board, or a named one ("Cursed forge", "Bigloo"), ranked
+    by base travel steps from `near`. Each row lists what's there (services with tier, since recipes need basic or
+    advanced; banks say whether you can deposit and withdraw), the route, and terrain the route requires.
     near defaults to the remembered current location.
     Legs blocked by permits or levels are avoided."""
     return s().find_services(service, near, top)

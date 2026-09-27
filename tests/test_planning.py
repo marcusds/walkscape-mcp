@@ -127,3 +127,22 @@ def test_rank_counts_the_inputs_used_up(svc):
     for r in out["ranking"]:
         assert r["inputs"][0]["input"].startswith("one arrows item") and r["input_steps"] > 0
         assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 100 + r["input_steps"], abs=10)
+
+
+def test_recipes_naming_their_service_by_keywords(svc):
+    # Make linen cloth asks for keywords ["loom"] rather than serviceKeyword; spectral gear for ["workshop", "cursed"]
+    out = svc.plan_recipe("Make linen cloth", 5, near="Halfling Campgrounds")
+    assert "Loom" in out["craft_at"] and out["nearest_service"]["service"] == "loom (basic)"
+    spectral = svc.optimize_loadout("Craft a spectral hatchet", "actions", pet="none", show_missing_upgrades=False)
+    assert spectral["service"].startswith("Cursed Workshop")
+
+
+def test_find_buildings(svc):
+    # Azurazera's bank is the Cold Storage of Commitment: no "bank" in its id, so the type comes from the wiki
+    bank = svc.find_services("bank", near="Azurazera", top=2)["locations"][0]
+    assert bank["location"] == "Azurazera"
+    assert bank["services"][0].startswith("Cold Storage of Commitment (Bank): deposit and withdraw "
+                                          "[entry needs: 150+ Jarvonia reputation")
+    assert "Polar Pruning (Barber)" in svc.location_info("Azurazera")["buildings"]
+    assert svc.find_services("job board", near="Kallaheim", top=1)["locations"][0]["location"] == "Kallaheim"
+    assert svc.service_table()["heatstroke_metalworks_advanced"]["kind"] == "forge"

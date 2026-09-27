@@ -262,7 +262,13 @@ def describe_requirement(r: dict) -> str:
         case "realm":
             s = f"in {q.get('realm')}"
         case "gameData":
-            s = f"{q.get('gameDataId')} >= {q.get('data')}"
+            rep = re.fullmatch(r"(\w+)Reputation", q.get("gameDataId") or "")
+            amount = re.search(r"[\d.]+", str(q.get("data")))
+            if rep and amount:
+                name = re.sub(r"(?<!^)([A-Z])", r" \1", rep[1]).title()
+                s = f"{float(amount[0]):g}+ {name} reputation"
+            else:
+                s = f"{q.get('gameDataId')} >= {q.get('data')}"
         case "itemEquipped":
             s = f"with {q.get('item')} equipped"
         case "activityType":

@@ -49,7 +49,7 @@ from .optimizer import (
 from .paths import player_file, player_info_file, save_history_dir, snapshot_dir
 from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .quality import at_least, quality_odds
-from .services import parse_services_page
+from .services import parse_building_requirements, parse_buildings_page, parse_services_page
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
@@ -60,6 +60,8 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 # a service's kind comes from its id/icon (e.g. "sawmill_halfling.png"); recipes require a kind and a tier
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
+# services whose id and icon don't name their kind (the wiki: smithing and trinketry bonuses)
+SERVICE_KIND_OVERRIDES = {"heatstroke_metalworks": "forge", "granular_faceting_facility": "trinketry_bench"}
 STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
 NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
 SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried")
@@ -417,14 +419,80 @@ class Service:
             self._services, self._services_for = out, tag
         return self._services
 
+    def building_table(self) -> dict[str, dict]:
+        """Building id -> {id, name, types, actions}. The planner data only lists building ids per location; what
+        each is (bank, tavern, general store...) and what you can do there (buy, sell, deposit, withdraw) comes from
+        the wiki's Buildings page."""
+        tag = self.wiki.state().get("tag")
+        if getattr(self, "_buildings_for", None) != tag or getattr(self, "_buildings", None) is None:
+            try:
+                self.wiki.update()
+                wiki = {norm(k): {"name": k, **v} for k, v in parse_buildings_page(self.wiki.page("Buildings", 1_000_000)).items()}
+            except Exception:
+                wiki = {}
+            out = {}
+            for loc in self.gd.locations.values():
+                for bid in loc.get("buildingList") or []:
+                    w = wiki.get(norm(bid))
+                    try:
+                        reqs = parse_building_requirements(self.wiki.page(w["name"], 20_000)) if w else []
+                    except Exception:
+                        reqs = []
+                    out[bid] = {"id": bid, "name": w["name"] if w else bid.replace("_", " ").title(),
+                                "types": w["types"] if w else [], "actions": w["actions"] if w else {},
+                                "requirements": reqs, "on_wiki": bool(w)}
+            self._buildings, self._buildings_for = out, tag
+        return self._buildings
+
+    def _building_label(self, b: dict) -> str:
+        """e.g. "Cold Storage of Commitment (Bank): deposit and withdraw [needs: jarvonia rep 150, NOT MET]"."""
+        label = b["name"] + (f" ({', '.join(b['types'])})" if b["types"] else "")
+        acts = b["actions"]
+        if "Bank" in b["types"] or "Deposit" in acts or "Withdraw" in acts:
+            if "Deposit" in acts and "Withdraw" in acts:
+                label += ": deposit and withdraw"
+            elif "Deposit" in acts:
+                label += ": deposit only"
+            else:
+                label += ": no deposit or withdraw"
+        if b["requirements"]:
+            needs = "; ".join(self._req_text(r) for r in b["requirements"])
+            if self._player:
+                ctx = self._context("travelling", None)
+                met = check_all(b["requirements"], ctx, None)
+                needs += ", NOT MET" if not met else ", assumed met (not in the save)" if ctx.assumed_history else ", met"
+            label += f" [entry needs: {needs}]"
+        return label
+
+    def _matching_buildings(self, q: str) -> dict[str, dict]:
+        """Buildings whose type, action or name fits the query; "bank" also finds outposts you can bank at."""
+        out = {}
+        for bid, b in self.building_table().items():
+            types, acts = [norm(t) for t in b["types"]], [norm(a) for a in b["actions"]]
+            if (any(q == t or q in t.split("_") for t in types) or any(q == a or q in a.split("_") for a in acts)
+                    or q in norm(b["name"]) or (q == "bank" and ("deposit" in acts or "withdraw" in acts))
+                    or (q == "shop" and "buy_items" in acts)):
+                out[bid] = b
+        return out
+
     def _recipe_service_req(self, rid: str) -> dict | None:
         return next((r["requirement"] for r in self.gd.recipes[rid].get("requirements") or []
                      if r["type"] == "service"), None)
 
+    @staticmethod
+    def _need_keywords(need: dict) -> list[str]:
+        """A recipe names its service either as serviceKeyword ("loom") or as keywords (["loom", "cursed"])."""
+        return [need["serviceKeyword"]] if need.get("serviceKeyword") else list(need.get("keywords") or [])
+
+    def _need_label(self, need: dict) -> str:
+        return f"{' '.join(reversed(self._need_keywords(need)))} ({need.get('tier')})"
+
     def _serves(self, sv: dict, need: dict) -> bool:
-        """A service fits a recipe if it's the right kind and tier. Advanced services are assumed to cover basic
-        recipes too."""
-        return sv["kind"] == need.get("serviceKeyword") and (need.get("tier") != "advanced" or sv["tier"] == "advanced")
+        """A service fits a recipe if it's the right kind and tier, and carries any extra keyword (e.g. cursed) in
+        its id. Advanced services are assumed to cover basic recipes too."""
+        kws = self._need_keywords(need)
+        return (bool(kws) and sv["kind"] == kws[0] and all(k in sv["id"] for k in kws[1:])
+                and (need.get("tier") != "advanced" or sv["tier"] == "advanced"))
 
     def _recipe_service_at(self, rid: str, lid: str) -> dict | None:
         need = self._recipe_service_req(rid)
@@ -730,6 +798,8 @@ class Service:
 
     def item_info(self, name: str) -> dict:
         gd = self.gd
+        if norm(name) in {norm(k["name"]) for k in gd.keywords.values()} | set(gd.keywords):
+            return self._keyword_info(name)
         item_id = gd.resolve(name, "item")
         item = gd.items[item_id]
         out = {
@@ -754,6 +824,21 @@ class Service:
         if self._player:
             out["you_have"] = self._have(item_id)
         out["sources"] = self._sources(item_id, 40)
+        return out
+
+    def _keyword_info(self, name: str) -> dict:
+        gd = self.gd
+        kid = next(k for k, kw in gd.keywords.items() if norm(name) in (k, norm(kw["name"])))
+        items = sorted((i for i, it in gd.items.items() if kid in (it.get("keywords") or [])), key=gd.name)
+        out = {"keyword": gd.keywords[kid]["name"], "items": [gd.name(i) for i in items]}
+        if self._player:
+            owned = {}
+            for i in items:
+                if gd.is_gear(i) and (quals := self._owned_qualities(i)):
+                    owned[gd.name(i)] = quals
+                elif not gd.is_gear(i) and i in self._player.item_counts:
+                    owned[gd.name(i)] = self._have(i)
+            out["you_own"] = owned
         return out
 
     def _sources(self, item_id: str, limit: int) -> list[str]:
@@ -835,6 +920,8 @@ class Service:
             "id": lid, "name": loc["name"], "faction": loc.get("faction"), "keywords": loc.get("keywords"),
             "activities": [gd.activities[a]["name"] for a in loc.get("activityList") or [] if a in gd.activities],
             "services": loc.get("serviceList"),
+            "buildings": [self._building_label(self.building_table()[b]) for b in loc.get("buildingList") or []],
+            **({"job_board": True} if loc.get("jobBoards") else {}),
         }
 
     # ---------- loadouts ----------
@@ -960,8 +1047,8 @@ class Service:
                 lid = gd.resolve(location, "location")
                 if not self._recipe_service_at(aid, lid):
                     need = self._recipe_service_req(aid)
-                    raise ValueError(f"{gd.locations[lid]['name']} has no {need.get('serviceKeyword')} "
-                                     f"({need.get('tier')}); find_services lists where to go.")
+                    raise ValueError(f"{gd.locations[lid]['name']} has no {self._need_label(need)}; "
+                                     "find_services lists where to go.")
                 return [lid]
             return self._recipe_locations(aid) or [None]
         if location:
@@ -1313,7 +1400,8 @@ class Service:
     def _service(self, sid: str) -> dict:
         sv = next((x for x in self.gd.snap.get("services_list") or [] if x["id"] == sid), {"id": sid, "name": sid})
         text = f"{sid} {sv.get('icon', '')}"
-        kind = next((k for k in SERVICE_KINDS if k in text), None)
+        kind = next((k for k in SERVICE_KINDS if k in text), None) or next(
+            (v for k, v in SERVICE_KIND_OVERRIDES.items() if k in sid), None)
         tier = "advanced" if "advanced" in sid else "basic" if kind in ("kitchen", "loom", "workshop", "trinketry_bench",
                                                                          "sawmill", "forge") else None
         return {"id": sid, "name": sv.get("name", sid), "kind": kind, "tier": tier}
@@ -1344,20 +1432,27 @@ class Service:
         q = norm(service)
         known = list(self.service_table().values())
         wanted = {sv["id"]: sv for sv in known if sv["kind"] == q or q in norm(sv["name"])}
-        if not wanted:
+        buildings = self._matching_buildings(q)
+        job_boards = q in ("job_board", "job_boards", "jobs")
+        if not wanted and not buildings and not job_boards:
             kinds = sorted({sv["kind"] for sv in known if sv["kind"]})
-            raise KeyError(f"No service matching {service!r}. Kinds: {kinds}")
+            types = sorted({t.lower() for b in self.building_table().values() for t in b["types"]})
+            actions = sorted({a.lower() for b in self.building_table().values() for a in b["actions"]})
+            raise KeyError(f"No service or building matching {service!r}. Services: {kinds}. Buildings: {types}. "
+                           f"Building actions: {actions}. Also: job board.")
         dist, prev = self._base_distances(src)
         rows = []
         for lid, loc in gd.locations.items():
             here = [wanted[x] for x in loc.get("serviceList") or [] if x in wanted]
-            if not here:
+            here_b = [buildings[x] for x in loc.get("buildingList") or [] if x in buildings]
+            boards = loc.get("jobBoards") or [] if job_boards else []
+            if not here and not here_b and not boards:
                 continue
             row = {"location": loc["name"], "services": [
                 f"{sv['name']}" + (f" ({sv['tier']})" if sv["tier"] and sv["tier"] not in sv["name"].lower() else "")
                 + (f": {sv['attr_text']}" if sv.get("attrs") else "")
                 + (f" [needs: {'; '.join(self._req_text(r) for r in sv['requirements'])}]" if sv.get("requirements") else "")
-                for sv in here]}
+                for sv in here] + [self._building_label(b) for b in here_b] + ["Job board" for _ in boards]}
             if lid not in dist:
                 row["reachable"] = False
                 rows.append((math.inf, row))
@@ -1730,7 +1825,7 @@ class Service:
             here = sorted((dist.get(lid, math.inf), l["name"]) for lid, l in gd.locations.items()
                           if ok & set(l.get("serviceList") or []))
             if here:
-                out["nearest_service"] = {"service": f"{svc.get('serviceKeyword')} ({svc.get('tier')})",
+                out["nearest_service"] = {"service": self._need_label(svc),
                                           "location": here[0][1], "base_steps": here[0][0]}
         out["notes"] = ["Expected values: double rewards add output, double action halves steps per completion, "
                         "'no materials consumed' saves ingredients.",
