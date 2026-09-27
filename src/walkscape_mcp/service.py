@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import gearset, sync
+from . import gearset, sync, wikidata
 from .engine import (
     GEAR_DEPENDENT_REQS,
     Context,
@@ -49,13 +49,11 @@ from .optimizer import (
 from .paths import player_file, player_info_file, save_history_dir, snapshot_dir
 from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .quality import at_least, quality_odds
-from .services import parse_building_requirements, parse_buildings_page, parse_services_page
 from .wiki import Wiki
 
 STALE_AFTER = 7 * 24 * 3600  # fallback only; a save reporting a new game version triggers a refresh sooner
 STAMP_WINDOW = 24 * 3600  # a snapshot this fresh is assumed to match the loaded save's game version
 RANK_FULL_SEARCH = 40  # rank_activities runs the full search on at most this many (or 3x top) candidates
-ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?")  # pre-structured notes, migrated
 # a service's kind comes from its id/icon (e.g. "sawmill_halfling.png"); recipes require a kind and a tier
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
@@ -351,25 +349,22 @@ class Service:
             return None
         return sum(a["points"] for a in self.achievement_list().values()) or None
 
-    def achievement_list(self) -> dict[str, dict]:
-        """Every achievement on the wiki's Achievements page, by name. Empty if the wiki is unavailable."""
+    def _wiki_index(self) -> dict:
+        """Wiki facts parsed once per dump (wikidata.py): services, buildings, achievements. Empty sections if the
+        wiki is unavailable."""
         tag = self.wiki.state().get("tag")
-        if getattr(self, "_achievements_for", None) != tag or not getattr(self, "_achievements", None):
-            out, difficulty = {}, None
+        idx = getattr(self, "_windex", None)
+        if idx is None or idx.get("tag") != tag:
             try:
-                self.wiki.update()
-                text = self.wiki.page("Achievements", 1_000_000)
+                idx = wikidata.load(self.wiki)
             except Exception:
-                return {}
-            for line in text.splitlines():
-                line = line.strip()
-                if m := re.fullmatch(r"(Easy|Normal|Hard|Extreme) Achievements", line):
-                    difficulty = m[1].lower()
-                elif m := ACHIEVEMENT_ROW.fullmatch(line):
-                    out[m["name"]] = {"difficulty": difficulty, "points": int(m["points"]),
-                                      "requirements": m["requirements"], "rewards": m["rewards"]}
-            self._achievements, self._achievements_for = out, tag
-        return self._achievements
+                idx = {"tag": tag, "services": {}, "buildings": {}, "achievements": {}}
+            self._windex = idx
+        return idx
+
+    def achievement_list(self) -> dict[str, dict]:
+        """Every achievement on the wiki's Achievements page, by name, with its requirements parsed into goals."""
+        return self._wiki_index()["achievements"]
 
     def _resolve_achievement(self, name: str, known: dict[str, dict]) -> str:
         if not known:  # no wiki: store the name as given
@@ -402,13 +397,9 @@ class Service:
 
     def service_table(self) -> dict[str, dict]:
         """Service id -> {id, name, kind, tier, attrs, requirements, attr_text}, bonuses from the wiki."""
-        tag = self.wiki.state().get("tag")
-        if getattr(self, "_services_for", None) != tag or getattr(self, "_services", None) is None:
-            try:
-                self.wiki.update()
-                wiki = {norm(k): v for k, v in parse_services_page(self.wiki.page("Services", 1_000_000)).items()}
-            except Exception:
-                wiki = {}
+        idx = self._wiki_index()
+        if getattr(self, "_services_for", None) is not idx or getattr(self, "_services", None) is None:
+            wiki = {norm(k): v for k, v in idx["services"].items()}
             out = {}
             for x in self.gd.snap.get("services_list") or []:
                 base = self._service(x["id"])
@@ -416,32 +407,24 @@ class Service:
                 out[x["id"]] = {**base, "tier": w.get("tier", base["tier"]), "attrs": w.get("attrs", []),
                                 "requirements": w.get("requirements", []), "attr_text": w.get("attr_text", ""),
                                 "on_wiki": bool(w)}
-            self._services, self._services_for = out, tag
+            self._services, self._services_for = out, idx
         return self._services
 
     def building_table(self) -> dict[str, dict]:
         """Building id -> {id, name, types, actions}. The planner data only lists building ids per location; what
         each is (bank, tavern, general store...) and what you can do there (buy, sell, deposit, withdraw) comes from
         the wiki's Buildings page."""
-        tag = self.wiki.state().get("tag")
-        if getattr(self, "_buildings_for", None) != tag or getattr(self, "_buildings", None) is None:
-            try:
-                self.wiki.update()
-                wiki = {norm(k): {"name": k, **v} for k, v in parse_buildings_page(self.wiki.page("Buildings", 1_000_000)).items()}
-            except Exception:
-                wiki = {}
+        idx = self._wiki_index()
+        if getattr(self, "_buildings_for", None) is not idx or getattr(self, "_buildings", None) is None:
+            wiki = {norm(k): {"name": k, **v} for k, v in idx["buildings"].items()}
             out = {}
             for loc in self.gd.locations.values():
                 for bid in loc.get("buildingList") or []:
                     w = wiki.get(norm(bid))
-                    try:
-                        reqs = parse_building_requirements(self.wiki.page(w["name"], 20_000)) if w else []
-                    except Exception:
-                        reqs = []
                     out[bid] = {"id": bid, "name": w["name"] if w else bid.replace("_", " ").title(),
                                 "types": w["types"] if w else [], "actions": w["actions"] if w else {},
-                                "requirements": reqs, "on_wiki": bool(w)}
-            self._buildings, self._buildings_for = out, tag
+                                "requirements": w.get("requirements", []) if w else [], "on_wiki": bool(w)}
+            self._buildings, self._buildings_for = out, idx
         return self._buildings
 
     def _building_label(self, b: dict) -> str:
@@ -746,6 +729,121 @@ class Service:
     def player_summary(self) -> dict:
         return {**self.player().summary(self.gd), "remembered_info": self._describe_info(self._info())}
 
+    # ---------- achievement goals ----------
+
+    def _keyword_id(self, name: str | None) -> str | None:
+        """"Light source" / "Fish" / "Woodcutting trees" -> a keyword id used by items or activities."""
+        if not name:
+            return None
+        n = norm(name)
+        by_name = {norm(k["name"]): kid for kid, k in self.gd.keywords.items()}
+        activity_kws = {k for a in self.gd.activities.values() for k in a.get("keywords") or []}
+        for cand in (n, n.rstrip("s"), n + "s"):
+            if cand in self.gd.keywords or cand in activity_kws:
+                return cand
+            if cand in by_name:
+                return by_name[cand]
+        return None
+
+    def _item_or_keyword(self, name: str) -> tuple[str | None, str | None]:
+        """A goal names an item ("Gold nugget") or a keyword ("Chest"); (item id, keyword id)."""
+        kid = self._keyword_id(name)
+        if kid and norm(name) not in self.gd.items:
+            return None, kid
+        try:
+            return self.gd.resolve(name, "item"), None
+        except KeyError:
+            return None, kid
+
+    def _way(self, aid: str) -> str:
+        name = self.gd.activity_like(aid)["name"]
+        if not self._player:
+            return name
+        ok, unmet = self._can_do(aid)
+        return name if ok else f"{name} (needs {'; '.join(unmet)})"
+
+    def _ways(self, aids, limit: int = 8) -> list[str]:
+        aids = list(dict.fromkeys(aids))
+        rows = sorted((self._way(a) for a in aids), key=lambda w: ("(needs" in w, w))
+        return rows[:limit] + ([f"... {len(rows) - limit} more"] if len(rows) > limit else [])
+
+    def _goal_view(self, g: dict) -> dict:
+        """What advances a parsed achievement goal, and the character's progress when the save shows it."""
+        gd, p, t, n = self.gd, self._player, g["type"], g["n"]
+        out = {"goal": g["text"], "type": t}
+        items_with = lambda kid: [i for i, it in gd.items.items() if kid in (it.get("keywords") or [])]
+        droppers = lambda ids: [x["id"] for i in ids for x in gd.item_sources.get(i, []) if x["kind"] == "activity"]
+        makers = lambda ids: [x["id"] for i in ids for x in gd.item_sources.get(i, []) if x["kind"] == "recipe"]
+        try:
+            if t == "actions":
+                out["ways"] = self._ways([gd.resolve(g["activity"], "activity")])
+            elif t == "actions_keyword":
+                kid = self._keyword_id(g["keyword"])
+                out["ways"] = self._ways(a for a, x in gd.activities.items() if kid in (x.get("keywords") or []))
+            elif t in ("total_steps", "character_level", "skill_level", "all_skills", "wealth") and p:
+                have = {"total_steps": p.steps, "character_level": p.char_level, "wealth": p.coins,
+                        "skill_level": p.skill_levels.get(g.get("skill"), 1)}.get(t)
+                if t == "all_skills":
+                    low = {k: v for k, v in p.skill_levels.items() if v < n}
+                    out["progress"] = "done" if not low else f"below {n}: " + ", ".join(f"{k} {v}" for k, v in low.items())
+                else:
+                    out["progress"] = f"{have:,}/{n:,}" + (" (coins only; wealth may count more)" if t == "wealth" else "")
+            elif t in ("gain_item", "gain_keyword", "craft_item", "craft_keyword"):
+                iid, kid = self._item_or_keyword(g.get("item") or g.get("keyword") or "")
+                ids = [iid] if iid else items_with(kid) if kid else []
+                if not ids and norm(g.get("keyword") or "") == "material":  # "a fine material": any material
+                    ids = [i for i, it in gd.items.items() if it.get("type") == "material"]
+                if not ids:
+                    return {**out, "unresolved": g.get("item") or g.get("keyword")}
+                if t.startswith("gain"):
+                    aids = droppers(ids)
+                    if skill := g.get("skill"):
+                        aids = [a for a in aids if (gd.activities[a].get("relatedSkillsList") or [None])[0] == skill]
+                    if akw := self._keyword_id(g.get("activity_keyword")):
+                        aids = [a for a in aids if akw in (gd.activities[a].get("keywords") or [])]
+                    out["ways"] = self._ways(aids)
+                else:
+                    out["ways"] = self._ways(makers(ids))
+                if p and iid and not g.get("fine"):
+                    out["you_have"] = self._have(iid)
+            elif t in ("craft_skill", "craft_distinct"):
+                rs = [r for r in gd.recipes if (gd.activity_like(r).get("relatedSkillsList") or [None])[0] == g["skill"]]
+                doable = [r for r in rs if not p or self._can_do(r)[0]]
+                out["ways"] = [f"{len(doable)} of {len(rs)} {g['skill']} recipes are doable now"]
+            elif t == "craft_quality":
+                kid = self._keyword_id(g.get("keyword"))
+                ids = [i for i in (items_with(kid) if kid else gd.items) if gd.items[i].get("type") == "crafted"]
+                out["ways"] = self._ways(makers(ids))
+                out["tool"] = "craft_quality gives the odds and steps for a recipe at a quality"
+            elif t in ("equip_keyword", "hold_distinct"):
+                kid = self._keyword_id(g["keyword"])
+                ids = items_with(kid) if kid else []
+                if p and ids:
+                    owned = sorted({gd.name(i) for i in ids if i in p.all_item_ids})
+                    out["progress"] = f"{len(owned)}/{n} kinds owned" + (f": {', '.join(owned)}" if owned else "")
+                out["ways"] = [f"get_item(\"{gd.keywords.get(kid, {}).get('name', g['keyword'])}\") lists all {len(ids)}"]
+            elif t == "stack":
+                kid = self._keyword_id(g["keyword"])
+                if p and kid:
+                    best = max(((p.item_counts.get(i, (0, 0))[0], gd.name(i)) for i in items_with(kid)), default=(0, None))
+                    out["progress"] = f"biggest stack {best[0]:,}/{n:,}" + (f" ({best[1]})" if best[1] else "")
+                out["ways"] = [f"cheapest_with_keyword(\"{g['keyword']}\", {n}) ranks them"]
+            elif t == "have_item":
+                iid = gd.resolve(g["item"], "item")
+                if p:
+                    c = p.item_counts.get(iid, (0, 0))
+                    out["progress"] = f"{c[1] if g.get('fine') else sum(c) or int(iid in p.all_item_ids)}/{n}"
+                out["ways"] = self._ways(droppers([iid]) + makers([iid]))
+            elif t in ("visit", "explore_region") and p:
+                region = g.get("region") or ""
+                if t == "explore_region":
+                    realms = self._realms()
+                    done = norm(region) in {norm(x) for r in self._info()["explored"] for x in (r, realms.get(r, r))}
+                    out["progress"] = "explored" if done else "not recorded as explored"
+        except KeyError as e:
+            out["unresolved"] = str(e)
+        return out
+
     def achievements(self, show: str = "not_unlocked") -> dict:
         """Wiki achievement list merged with what the user has told us."""
         known = self.achievement_list()
@@ -757,8 +855,9 @@ class Service:
             mine = ach.get(name, {})
             status = "unlocked" if mine.get("unlocked") else "in progress" if mine.get("progress") else "not recorded"
             if show == "all" or (show == "unlocked") == (status == "unlocked"):
-                rows.append({"name": name, **a, "status": status, **({"progress": mine["progress"]}
-                                                                      if mine.get("progress") else {})})
+                rows.append({"name": name, **{k: v for k, v in a.items() if k != "goals"}, "status": status,
+                             **({"progress": mine["progress"]} if mine.get("progress") else {}),
+                             "goals": [self._goal_view(g) for g in a.get("goals") or []]})
         recorded = sum(known[a]["points"] for a, v in ach.items() if v.get("unlocked") and a in known)
         out = {"achievements": rows, "recorded_unlocked_points": recorded}
         if self._player:

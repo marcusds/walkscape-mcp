@@ -135,7 +135,11 @@ def achievements(show: str = "not_unlocked") -> dict:
     """Every achievement (wiki list: difficulty, points, requirements, rewards) with the user's recorded status.
     show: "not_unlocked" (default; for "what should I go for next"), "unlocked" or "all".
     The save only has a point total, so an achievement the user never mentioned shows as "not recorded".
-    Collectibles are worth 1 achievement point each when found, so they count toward point goals too."""
+    Each achievement's requirements are split into goals: what advances each one (activities or recipes, with
+    levels the character still needs) and progress where the save shows it (levels, steps, coins, items held,
+    kinds of light sources/shields/gems owned, biggest food stack). Type "other" goals (hatching eggs, dropping an
+    item...) aren't modelled. Collectibles are worth 1 achievement point each when found, so they count toward
+    point goals too."""
     return s().achievements(show)
 
 
