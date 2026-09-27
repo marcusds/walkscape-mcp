@@ -206,7 +206,7 @@ class GameData:
         for tid, t in self.loot_tables.items():
             rows = list(t.get("tableRows") or []) + [r for st in t.get("subTables") or [] for r in st.get("tableRows") or []]
             for r in rows:
-                iid = r.get("rowItemID")
+                iid = r.get("rowItemID") or ("coins" if r.get("isMoney") else None)  # money rows have no item
                 if not iid:
                     continue
                 for kind, src in by_table.get(tid, []):

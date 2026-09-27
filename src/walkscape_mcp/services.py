@@ -142,3 +142,22 @@ def parse_building_requirements(page: str) -> list[dict]:
     text = " ".join(line.strip() for line in page[page.find(":", i) + 1:].splitlines()[:15] if line.strip())
     m = re.match(r"((?:(?:(?:Have|At least|Requires)[^.]*\.|Complete actions of the [^.]*\. \[[\d,]+\])\s*)+)", text)
     return parse_requirements(m[1]) if m else [{"type": "unparsed", "opposite": False, "requirement": {"text": text[:120]}}]
+
+
+def parse_shop_stock(page: str) -> list[dict]:
+    """Items a building sells, from its wiki page's Inventory section: [{"item", "stock", "price"}]. The page
+    doesn't name the currency (the Adventurers' Guild outposts take guild tokens, the rest coins)."""
+    i, j = page.find("\nInventory"), page.find("\nPurchases")
+    if i < 0:
+        return []
+    out = []
+    for line in page[i:j if j > i else None].splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 3 or cells[0] == "Item Name":
+            continue
+        try:
+            stock, price = int(cells[-2].replace(",", "")), int(cells[-1].replace(",", ""))
+        except ValueError:
+            continue
+        out.append({"item": cells[0], "stock": stock, "price": price})
+    return out

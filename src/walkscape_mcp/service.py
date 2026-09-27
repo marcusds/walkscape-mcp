@@ -418,14 +418,29 @@ class Service:
         if getattr(self, "_buildings_for", None) is not idx or getattr(self, "_buildings", None) is None:
             wiki = {norm(k): {"name": k, **v} for k, v in idx["buildings"].items()}
             out = {}
-            for loc in self.gd.locations.values():
+            for lid, loc in self.gd.locations.items():
                 for bid in loc.get("buildingList") or []:
                     w = wiki.get(norm(bid))
                     out[bid] = {"id": bid, "name": w["name"] if w else bid.replace("_", " ").title(),
-                                "types": w["types"] if w else [], "actions": w["actions"] if w else {},
-                                "requirements": w.get("requirements", []) if w else [], "on_wiki": bool(w)}
+                                "location": lid, "types": w["types"] if w else [],
+                                "actions": w["actions"] if w else {},
+                                "requirements": w.get("requirements", []) if w else [],
+                                "sells": w.get("sells", []) if w else [], "on_wiki": bool(w)}
             self._buildings, self._buildings_for = out, idx
         return self._buildings
+
+    def shop_sources(self, item_id: str) -> list[dict]:
+        """Shops that sell an item: [{"building", "location", "price", "currency", "stock", "entry_met"}]."""
+        out = []
+        for b in self.building_table().values():
+            for x in b["sells"]:
+                if norm(x["item"]) == item_id:
+                    met = True
+                    if b["requirements"] and self._player:
+                        met = check_all(b["requirements"], self._context("travelling", None), None)
+                    out.append({"building": b["name"], "location": b["location"], "price": x["price"],
+                                "currency": x["currency"], "stock": x["stock"], "entry_met": met})
+        return out
 
     def _building_label(self, b: dict) -> str:
         """e.g. "Cold Storage of Commitment (Bank): deposit and withdraw [needs: jarvonia rep 150, NOT MET]"."""
@@ -974,6 +989,10 @@ class Service:
                 srcs.append(f"container: {gd.name(s['id'])}")
             elif s["kind"] == "recipe":
                 srcs.append(f"recipe: {gd.recipes[s['id']]['name']}")
+        for x in self.shop_sources(item_id):
+            currency = "Adventurers' Guild tokens" if x["currency"] == "adventurers_guild_token" else "coins"
+            srcs.append(f"shop: {x['building']} @ {gd.locations[x['location']]['name']} ({x['price']:,} {currency}"
+                        f"{'' if x['entry_met'] else '; entry requirement NOT MET'})")
         return srcs
 
     def _have(self, item_id: str) -> str:

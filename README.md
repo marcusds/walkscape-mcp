@@ -7,7 +7,7 @@ An MCP server for optimizing WalkScape loadouts by talking to Claude, e.g.
 ## Data sources
 
 - **Game data** – the official gear planner API (`gear.walkscape.app`): exact item stats per quality, attribute conditions, activities, loot table weights, pets, recipes. Snapshotted to `~/.local/share/walkscape-mcp/snapshot/` and refreshed in the background when a loaded save reports a different game version, or after 7 days as a fallback. A full refresh takes about 6 minutes: the API is slow, and requests are capped at 4 in flight to keep load off it. The running server keeps using the old snapshot and switches to the new one when the refresh finishes.
-- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h, so wiki.walkscape.app itself gets no traffic. Used for mechanics, lore, shops and anything the structured data doesn't cover. The crafting service bonuses, buildings (type, what you can do there, entry requirements) and achievements (requirements split into goals) are parsed once per dump into `wiki/index.json` next to it; `walkscape-wiki-index` rebuilds it, and the server does so by itself when the dump changes.
+- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h, so wiki.walkscape.app itself gets no traffic. Used for mechanics, lore, shops and anything the structured data doesn't cover. The crafting service bonuses, buildings (type, what you can do there, entry requirements, shop stock and prices) and achievements (requirements split into goals) are parsed once per dump into `wiki/index.json` next to it; `walkscape-wiki-index` rebuilds it, and the server does so by itself when the dump changes.
 
 ## Setup
 
@@ -37,7 +37,7 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `load_player_save` / `player_summary` | Load and inspect your character export |
 | `remember_player_info` | Store what the export lacks: action-history unlocks, achievements, goals, explored regions, current location, and gear/levels/items gained since the export |
 | `achievements` | Every achievement with points, requirements and your recorded status; requirements split into goals with what advances each and your progress |
-| `plan_achievements` | Remaining achievements ordered by points per step, crediting what each grind also advances (drops, action counts, crafts, XP), with the levelling each needs (shared once reached) and when point targets are reached |
+| `plan_achievements` | Remaining achievements ordered by points per step: levelling and reputation needed (shared once reached), missing gear, inputs, materials, shop buys and travel between them, crediting what each grind also advances; and when point targets are reached |
 | `optimize_loadout` | Best loadout for an activity/recipe and objective, using owned gear; shows the diff from your current gear, unowned upgrades, an export string and a planner link. Recipes also pick the best crafting service location |
 | `evaluate_loadout` | Stats, steps and drop rates for your current gear or a gear-set string |
 | `rank_activities` | Where to farm an item (or its fine version, or several items at once) in the fewest steps, optionally counting travel from where you are |

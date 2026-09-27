@@ -1,6 +1,6 @@
 """Wiki facts the game data doesn't have, parsed once per wiki dump into an index file.
 
-Crafting service bonuses, buildings (type, what you can do there, entry requirements) and achievements (with their
+Crafting service bonuses, buildings (type, what you can do there, entry requirements, shop stock) and achievements (with their
 requirements split into typed goals) live only on the wiki. Parsing them takes many page reads, so it's done when
 a new dump arrives and stored in ~/.local/share/walkscape-mcp/wiki/index.json; the server just loads that.
 
@@ -15,9 +15,9 @@ import re
 import time
 
 from .paths import wiki_dir
-from .services import parse_building_requirements, parse_buildings_page, parse_services_page
+from .services import parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_stock
 
-INDEX_VERSION = 1  # bump when the index layout or a parser changes, so old indexes are rebuilt
+INDEX_VERSION = 3  # bump when the index layout or a parser changes, so old indexes are rebuilt
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 N = r"\[(?P<n>[\d,]+)\]"
 
@@ -80,6 +80,8 @@ BODY_CLAUSES = [
     (r"Collect (?P<kw>.+?) from activities\.", lambda m: {"type": "gain_keyword", "keyword": m["kw"]}),
     (r"Catch (?P<kw>.+?) while (?P<skill>\w+)", lambda m: {"type": "gain_keyword", "keyword": m["kw"],
                                                            "skill": m["skill"].lower()}),
+    (r"Hatch any Pet egg", lambda m: {"type": "hatch", "item": None}),
+    (r"Hatch an? (?P<i>.+? egg)", lambda m: {"type": "hatch", "item": m["i"]}),
     (r"Complete a (?P<skill>\w+) recipe", lambda m: {"type": "craft_skill", "skill": m["skill"].lower()}),
     (r"Complete different (?P<skill>\w+) recipe options\.", lambda m: {"type": "craft_distinct",
                                                                        "skill": m["skill"].lower()}),
@@ -142,9 +144,12 @@ def build(wiki) -> dict:
     buildings = parse_buildings_page(wiki.page("Buildings", 1_000_000))
     for name, b in buildings.items():
         try:
-            b["requirements"] = parse_building_requirements(wiki.page(name, 20_000))
+            page = wiki.page(name, 50_000)
         except Exception:
-            b["requirements"] = []
+            page = ""
+        b["requirements"] = parse_building_requirements(page)
+        currency = "adventurers_guild_token" if "Outpost" in b["types"] else "coins"
+        b["sells"] = [{**x, "currency": currency} for x in parse_shop_stock(page)]
     return {"version": INDEX_VERSION, "tag": wiki.state().get("tag"), "built_at": time.time(),
             "services": services, "buildings": buildings,
             "achievements": parse_achievements_page(wiki.page("Achievements", 1_000_000))}

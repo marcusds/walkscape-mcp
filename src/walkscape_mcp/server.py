@@ -147,14 +147,17 @@ def achievements(show: str = "not_unlocked") -> dict:
 def plan_achievements(targets: list[int] | None = None, only: list[str] | None = None,
                       pet: str | None = "auto") -> dict:
     """Order the achievements the user hasn't unlocked by achievement points per step. Each gets a step estimate
-    from its parsed goals (actions, drops, crafts, kinds of items to collect, stacks, levels) with the best owned
-    loadouts, plus the levelling it still needs. A grind also scores the share of other achievements it advances
-    (the same activity's actions and drops, crafts, XP toward their levels), and that progress is credited once
-    it's chosen; levels reached count for later ones, and walking goals (total steps, character level) complete
-    by themselves as steps add up. Each row: points, steps, how, levelling, also_advances, running total of steps
-    and points. targets: point totals to report when they're reached
-    (e.g. [180, 190] for the buckler and bandolier). only: plan just these achievements. Achievements it can't
-    estimate (eggs, coins, shop items, one-off actions) are listed with why. Slow: a few minutes for all of them."""
+    from its parsed goals (actions, drops, crafts, kinds of items to collect, stacks, levels, reputation, coins,
+    eggs to hatch, a work-efficiency target) with the best owned loadouts, including the levelling or reputation
+    it still needs, gear an activity requires but the user lacks, inputs it uses up (arrows, traps), materials,
+    shop purchases (guild tokens are farmed; coin prices are noted) and travel from where the previous
+    achievement ended. A grind also scores the share of other achievements it advances (the same activity's
+    actions and drops, crafts, XP and reputation toward their levels), and that progress is credited once it's
+    chosen; walking goals (total steps, character level) complete by themselves as steps add up. Each row: points,
+    steps, travel_steps and route, how, levelling, also_advances, running total of steps and points.
+    targets: point totals to report when they're reached (e.g. [180, 190] for the buckler and bandolier).
+    only: plan just these achievements. Achievements it can't estimate are listed with why.
+    Slow: several minutes for all of them."""
     return s().plan_achievements(targets, only, pet)
 
 
