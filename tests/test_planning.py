@@ -148,8 +148,14 @@ def test_find_buildings(svc):
     assert svc.service_table()["heatstroke_metalworks_advanced"]["kind"] == "forge"
 
 
+def _at_hunting(svc, xp):
+    from dataclasses import replace
+    svc._player = replace(svc._player, skill_xp={**svc._player.skill_xp, "hunting": xp})
+
+
 def test_plan_recipe_crafts_or_flags_the_shortfall(svc):
-    # crab rolls need bread (crafted from wheat) and raw crab (no activity drops it at these levels)
+    # crab rolls need bread (crafted from wheat) and raw crab, which only hunting activities drop
+    _at_hunting(svc, 0)
     out = svc.plan_recipe("Make crab rolls", 200)
     mats = {m["item"]: m for m in out["materials"]}
     assert mats["Bread"]["gather"]["craft"] == "Bake bread" and mats["Bread"]["gather"]["steps_for_shortfall"] > 0
@@ -174,3 +180,11 @@ def test_cheapest_with_keyword_counts_stock(svc):
     assert {"Hemp", "Flax"} <= {r["item"] for r in rows}
     assert all(r["short"] == max(0, 140 - r["have"]) and (r["steps"] == 0) == (r["short"] == 0) for r in rows)
     assert [r["steps"] for r in rows] == sorted(r["steps"] for r in rows)
+
+
+def test_plan_recipe_names_what_blocks_a_material(svc):
+    _at_hunting(svc, 0)
+    gather = svc.plan_recipe("Cook meat", 20)["materials"][0]["gather"]
+    assert any(b.startswith("Squirrel hunting") and "hunting lvl 15" in b for b in gather["blocked_activities"])
+    _at_hunting(svc, 10**8)  # at hunting 99 the same plan farms the meat instead
+    assert "steps_for_shortfall" in svc.plan_recipe("Cook meat", 20)["materials"][0]["gather"]

@@ -1659,6 +1659,7 @@ class Service:
         srcs = [x for t in tids for x in gd.item_sources.get(t, [])]
         special = not drops_only and any(x["kind"] == "gear_special" for x in srcs)
         acts = [x["id"] for x in srcs if x["kind"] == "activity"]
+        direct = set(acts)  # activities that drop it; the rest only through "chance to find" gear
         if special:
             acts = list(gd.activities)
         pool = self._pool(owned_only, carried_only)
@@ -1667,7 +1668,7 @@ class Service:
             for loc in gd.activity_locations(aid) or [None]:
                 ctx = self._context(aid, loc, carried_only)
                 if self._player and ctx.skill_levels.get(ctx.main_skill, 0) < ctx.required_level:
-                    if not special:  # every activity is a source of "chance to find" items; don't list them all
+                    if aid in direct:  # every activity is a source of "chance to find" items; don't list them all
                         blocked.append((ctx, loc, [f"{ctx.main_skill} lvl {ctx.required_level} "
                                                    f"(you: {ctx.skill_levels.get(ctx.main_skill, 1)})"]))
                     continue
@@ -1676,7 +1677,7 @@ class Service:
                                                 for r in ctx.activity.get("visibilityRequirements") or []):
                     continue
                 if status == "hidden":
-                    if not special:
+                    if aid in direct:
                         blocked.append((ctx, loc, [f"hidden until {x}" for x in unlock]))
                     continue
                 if status == "assumed":
@@ -1697,7 +1698,7 @@ class Service:
             sc = searcher.score(lo)
             if sc[0] == 0 and not math.isinf(sc[1]):
                 rows.append((sc[1], ctx.activity["name"], gd.locations[loc]["name"] if loc else None, ctx, lo))
-            elif sc[0] and not special:
+            elif sc[0] and ctx.activity["id"] in direct:
                 blocked.append((ctx, loc, evaluate(ctx, lo).unmet_activity_requirements))
         rows.sort(key=lambda r: r[:3])
         src = self._near(near)
@@ -1935,7 +1936,12 @@ class Service:
                 pick = min(rows, key=lambda x: supply[x["item"]]["steps"] if supply[x["item"]] else math.inf)
                 how = supply[pick["item"]]
                 if how is None:
-                    pick["gather"] = {"cannot_get": "no activity drops it and no recipe you can make yields it",
+                    blocked = self.rank_activities(pick["id"], top=1).get("blocked_sources", []) if any(
+                        x["kind"] == "activity" for x in gd.item_sources.get(pick["id"], [])) else []
+                    pick["gather"] = {"cannot_get": "the character can't do any activity that drops it or make it yet",
+                                      **({"blocked_activities": [f"{b['activity']} @ {b['location']}: "
+                                                                 f"{'; '.join(b['unmet'])}" for b in blocked]}
+                                         if blocked else {}),
                                       "other_sources": self._sources(pick["id"], 10)}
                     missing.append(pick["item"])
                 elif how["how"].startswith("craft"):
@@ -1956,8 +1962,9 @@ class Service:
             "completions": completions, "crafting_steps": steps, "materials": materials,
             **({"craft_at": f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"} if ctx.service else {}),
             "steps_gathering_shortfall": gather_total, "total_steps": steps + gather_total,
-            **({"total_steps_leaves_out": f"{', '.join(missing)}: you can't farm or craft it yet, so the plan "
-                                          "can't be completed as is"} if missing else {}),
+            **({"total_steps_leaves_out": f"{', '.join(missing)}: the character can't farm or craft it yet "
+                                          "(see its blocked_activities), so the plan can't be completed as is"}
+               if missing else {}),
             "loadout": {SLOT_LABELS.get(k, k): gear_source(gd, oi).label for k, oi in lo.slots.items() if oi},
             "planner_link": gearset.encode_link(gd, lo, rid),
             "metrics": {k: m[k] for k in ("steps_per_completion", "double_action", "double_rewards",
