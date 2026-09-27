@@ -46,7 +46,10 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `craft_quality` | Odds of each crafted quality and the best loadout/service for a target quality |
 | `steps_to_level` | XP and steps to reach a level with an activity |
 | `inventory_fill` | Steps until an activity's drops fill N inventory slots |
-| `get_item` / `get_activity` / `get_location` / `search_game_data` | Lookups |
+| `list_activities` | Activities and recipes by skill, activity keyword or what a recipe makes, with the level needed and whether you can do them |
+| `compare_activities` | Rank several activities by an objective, each with its best loadout: e.g. the fastest tree for a 5,000-actions achievement |
+| `cheapest_with_keyword` | Fewest steps to a stack of N of any item with a keyword (e.g. 1,000 of any food), farming or crafting |
+| `get_item` / `get_activity` / `get_location` / `search_game_data` | Lookups; `get_item`/`get_activity` take `names` for several at once, and `get_item` on a keyword lists its items |
 | `decode_gear_set` | Read a gear.walkscape.app export string |
 | `wiki_search` / `wiki_page` | Offline wiki |
 | `data_status` | Data freshness; `refresh=true` forces an update |

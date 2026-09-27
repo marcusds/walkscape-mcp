@@ -1195,7 +1195,8 @@ class Service:
                 if self._player and probe.skill_levels.get(probe.main_skill, 1) < probe.required_level:
                     continue
                 plan = self.plan_recipe(src["id"], count, near, pet)
-                opts.append({"how": f"craft ({plan['recipe']})", "steps": plan["total_steps"]})
+                if "total_steps_leaves_out" not in plan:  # a material the character can't get: not an option
+                    opts.append({"how": f"craft ({plan['recipe']})", "steps": plan["total_steps"]})
             best = min(opts, key=lambda o: o["steps"]) if opts else None
         finally:
             busy.discard(item_id)
@@ -1772,6 +1773,130 @@ class Service:
         _, ctx, lo = best
         ctx.assumed_history.clear()  # report only what the chosen loadout depends on
         return ctx, lo, evaluate(ctx, lo)
+
+    # ---------- listing and comparing ----------
+
+    def _matching_activities(self, skill: str | None, keyword: str | None, makes: str | None, kind: str,
+                             names: list[str] | None = None) -> list[str]:
+        """Activity/recipe ids by main skill, activity keyword (e.g. woodcutting_trees, cooking_recipe) or a
+        keyword of an item a recipe makes (e.g. food)."""
+        gd = self.gd
+        if names:
+            return [self._resolve_any(n, ["activity", "recipe"])[1] for n in names]
+        if not (skill or keyword or makes):
+            raise ValueError("Pass skill, keyword or makes (or names).")
+        pools = {"activity": gd.activities, "recipe": gd.recipes}
+        kinds = ["activity", "recipe"] if kind == "both" else [kind]
+        if any(k not in pools for k in kinds):
+            raise ValueError("kind is activity, recipe or both")
+        sk, kw, mk = (norm(x) if x else None for x in (skill, keyword, makes))
+        out = []
+        for k in kinds:
+            for aid, a in pools[k].items():
+                a = gd.activity_like(aid)
+                if sk and (a.get("relatedSkillsList") or [None])[0] != sk:
+                    continue
+                if kw and not any(kw == norm(x) or kw in norm(x).split("_") for x in a.get("keywords") or []):
+                    continue
+                if mk and not any(mk in (gd.items.get(i, {}).get("keywords") or []) for i in a.get("itemRewards") or {}):
+                    continue
+                out.append(aid)
+        return out
+
+    def _can_do(self, aid: str) -> tuple[bool, list[str]]:
+        """Whether the character meets the level and other non-gear requirements, and which they miss."""
+        ctx = self._context(aid, None)
+        reqs = [r for r in ctx.activity.get("requirements") or []
+                if r["type"] not in GEAR_DEPENDENT_REQS and r["type"] != "service"]
+        unmet = [self._req_text(r) for r in reqs if not check_all([r], ctx, None)]
+        return not unmet, unmet
+
+    def list_activities(self, skill: str | None = None, keyword: str | None = None, makes: str | None = None,
+                        kind: str = "both", doable_only: bool = False) -> dict:
+        gd, rows = self.gd, []
+        for aid in self._matching_activities(skill, keyword, makes, kind):
+            a = gd.activity_like(aid)
+            ctx = self._context(aid, None)
+            ok, unmet = self._can_do(aid) if self._player else (True, [])
+            if doable_only and not ok:
+                continue
+            row = {"name": a["name"], "kind": "recipe" if aid in gd.recipes else "activity",
+                   "skill": ctx.main_skill, "level": ctx.required_level}
+            if aid in gd.recipes:
+                need = self._recipe_service_req(aid)
+                row["makes"] = [gd.name(i) for i in a.get("itemRewards") or {}]
+                if need:
+                    row["service"] = self._need_label(need)
+            else:
+                row["locations"] = [gd.locations[l]["name"] for l in gd.activity_locations(aid)]
+            if self._player:
+                row["can_do"] = ok
+                if unmet:
+                    row["missing"] = unmet
+            rows.append(row)
+        rows.sort(key=lambda r: (r["skill"] or "", r["level"], r["name"]))
+        return {"count": len(rows), "activities": rows}
+
+    def compare_activities(self, names: list[str] | None = None, skill: str | None = None, keyword: str | None = None,
+                           makes: str | None = None, objective: str = "actions", target: str | None = None,
+                           count: int | None = None, kind: str = "both", pet: str | None = "auto",
+                           top: int = 10) -> dict:
+        gd = self.gd
+        obj = self._objective(objective, target)
+        ids = self._matching_activities(skill, keyword, makes, kind, names)
+        rows, skipped = [], []
+        for aid in ids:
+            name = gd.activity_like(aid)["name"]
+            ok, unmet = self._can_do(aid) if self._player else (True, [])
+            if not ok:
+                skipped.append({"name": name, "missing": unmet})
+                continue
+            ctx, lo, ev = self._best_loadout(aid, obj, pet=pet)
+            v = obj.value(ev)
+            if math.isinf(v):
+                skipped.append({"name": name, "missing": ["the objective can't be met here with your gear"]})
+                continue
+            row = {"name": name, "result": obj.describe(v),
+                   "location": gd.locations[ctx.location_id]["name"] if ctx.location_id else None}
+            if count and obj.kind not in ("xp", "total_xp"):
+                row["steps_for_count"] = round(v * count)
+            row["planner_link"] = gearset.encode_link(gd, lo, aid)
+            rows.append((v, row))
+        rows.sort(key=lambda t: t[0])
+        return {"objective": obj.kind + (f" ({target})" if target else ""),
+                "ranking": [r for _, r in rows[:top]], "not_doable": skipped,
+                "note": "Each row uses its own best owned loadout; optimize_loadout on a row gives the full gear."}
+
+    def cheapest_with_keyword(self, keyword: str, quantity: int, near: str | None = None, pet: str | None = "auto",
+                              top: int = 5) -> dict:
+        """For goals like "a stack of 1,000 of any food": each item with the keyword, how many the character has,
+        and the steps to get the rest by the cheaper of farming or crafting."""
+        gd, p = self.gd, self._player
+        kw = norm(keyword)
+        items = [i for i, it in gd.items.items() if kw in (it.get("keywords") or [])]
+        if not items:
+            raise KeyError(f"No items with keyword {keyword!r}")
+        src = self._near(near)
+        near_name = gd.locations[src]["name"] if src else None
+        rows, cannot = [], []
+        self._supply_cache, self._supplying = {}, set()
+        try:
+            for i in items:
+                have = p.item_counts.get(i, (0, 0))[0] if p else 0
+                short = max(0, quantity - have)
+                how = self._supply_steps(i, short, near_name, pet) if short else {"how": "already have them", "steps": 0}
+                if how is None:
+                    cannot.append(gd.name(i))
+                    continue
+                rows.append((how["steps"], {"item": gd.name(i), "have": have, "short": short,
+                                            "how": how["how"], "steps": how["steps"]}))
+        finally:
+            self._supply_cache = None
+        rows.sort(key=lambda t: t[0])
+        return {"keyword": keyword, "quantity": quantity, "ranking": [r for _, r in rows[:top]],
+                "cannot_get_yet": sorted(cannot),
+                "note": "Stock counts only normal-quality items (fine ones stack separately). Steps leave out travel; "
+                        "plan_recipe or rank_activities on the winner give the trip and loadout."}
 
     def plan_recipe(self, recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
         outer = self._supply_cache is None  # _supply_steps may plan sub-recipes; share one cache per top-level call

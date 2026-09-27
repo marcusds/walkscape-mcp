@@ -209,19 +209,65 @@ def rank_activities(target: str | None = None, top: int = 10, pet: str | None = 
     return s().rank_activities(target, top, pet, consumable, owned_only, targets, near, quantity, fine, carried_only)
 
 
+def _each(fn, name: str | None, names: list[str] | None):
+    if names:
+        out = {}
+        for n in names:
+            try:
+                out[n] = fn(n)
+            except (KeyError, ValueError) as e:
+                out[n] = {"error": str(e)}
+        return out
+    if not name:
+        raise ValueError("Pass name, or names for several at once.")
+    return fn(name)
+
+
 @mcp.tool()
-def get_item(name: str) -> dict:
+def get_item(name: str | None = None, names: list[str] | None = None) -> dict:
     """Item details: slot, keywords, requirements, attributes at every quality, consumable effects,
-    which qualities the player owns, how many they have, and where the item comes from."""
-    return s().item_info(name)
+    which qualities the player owns, how many they have, and where the item comes from.
+    A keyword name ("Light source", "Food") lists the items with that keyword and which the player owns.
+    names: several items at once; returns name -> details."""
+    return _each(s().item_info, name, names)
 
 
 @mcp.tool()
-def get_activity(name: str) -> dict:
+def get_activity(name: str | None = None, names: list[str] | None = None) -> dict:
     """Activity or recipe details: requirements (marked met/NOT MET for the loaded character, with their level),
     locations, base/min steps, XP, base drop rates. Recipes also list each material with how many the character
-    has and where it comes from."""
-    return s().activity_info(name)
+    has and where it comes from. names: several at once; returns name -> details."""
+    return _each(s().activity_info, name, names)
+
+
+@mcp.tool()
+def list_activities(skill: str | None = None, keyword: str | None = None, makes: str | None = None,
+                    kind: str = "both", doable_only: bool = False) -> dict:
+    """Activities and recipes by main skill ("tailoring"), activity keyword ("woodcutting_trees", "mining_ores",
+    "fishing", "plant_foraging", "cooking_recipe") or a keyword of what a recipe makes ("food", "pickaxe").
+    kind: activity, recipe or both. Each row has the level needed, locations or crafting service, and whether the
+    character can do it (with what's missing). doable_only drops the rest."""
+    return s().list_activities(skill, keyword, makes, kind, doable_only)
+
+
+@mcp.tool()
+def compare_activities(names: list[str] | None = None, skill: str | None = None, keyword: str | None = None,
+                       makes: str | None = None, objective: str = "actions", target: str | None = None,
+                       count: int | None = None, kind: str = "both", pet: str | None = "auto", top: int = 10) -> dict:
+    """Rank several activities/recipes by an optimize_loadout objective, each with its best owned loadout. Pick
+    them by names, or like list_activities by skill / keyword / makes. For achievements like "5,000 actions of any
+    tree" use keyword="woodcutting_trees", objective="actions", count=remaining. count adds steps_for_count
+    (not for xp objectives). Activities the character can't do yet are listed separately with what's missing."""
+    return s().compare_activities(names, skill, keyword, makes, objective, target, count, kind, pet, top)
+
+
+@mcp.tool()
+def cheapest_with_keyword(keyword: str, quantity: int, near: str | None = None, pet: str | None = "auto",
+                          top: int = 5) -> dict:
+    """For goals like "a stack of 1,000 of any food": every item with the keyword ranked by the steps to reach
+    `quantity`, counting what the character has and getting the rest the cheaper way (farming, or crafting with
+    materials farmed). Items the character can't get yet are listed separately."""
+    return s().cheapest_with_keyword(keyword, quantity, near, pet, top)
 
 
 @mcp.tool()

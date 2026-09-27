@@ -155,3 +155,22 @@ def test_plan_recipe_crafts_or_flags_the_shortfall(svc):
     assert mats["Bread"]["gather"]["craft"] == "Bake bread" and mats["Bread"]["gather"]["steps_for_shortfall"] > 0
     assert "cannot_get" in mats["Raw crab"]["gather"] and "Raw crab" in out["total_steps_leaves_out"]
     assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"]
+
+
+def test_list_and_compare_activities(svc):
+    trees = svc.list_activities(keyword="woodcutting_trees")["activities"]
+    assert len(trees) >= 10 and {"Cut birch trees", "Cut mangrove trees"} <= {t["name"] for t in trees}
+    assert [t["name"] for t in svc.list_activities(skill="tailoring", doable_only=True)["activities"]] == ["Make linen cloth"]
+    assert "Bread" in {m for r in svc.list_activities(makes="food")["activities"] for m in r.get("makes", [])}
+    out = svc.compare_activities(names=["Cut birch trees", "Cut oak trees", "Cut yew trees"], count=100)
+    rows = out["ranking"]
+    assert rows[0]["name"] == "Cut birch trees" and rows[0]["steps_for_count"] < rows[1]["steps_for_count"]
+    assert out["not_doable"][0]["missing"] == ["woodcutting lvl 60"]
+
+
+def test_cheapest_with_keyword_counts_stock(svc):
+    out = svc.cheapest_with_keyword("fibrous_plant", 140, top=10)
+    rows = out["ranking"]
+    assert {"Hemp", "Flax"} <= {r["item"] for r in rows}
+    assert all(r["short"] == max(0, 140 - r["have"]) and (r["steps"] == 0) == (r["short"] == 0) for r in rows)
+    assert [r["steps"] for r in rows] == sorted(r["steps"] for r in rows)
