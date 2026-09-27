@@ -1171,6 +1171,21 @@ class Service:
             out.append(need)
         return out
 
+    def _farm_rate(self, item_id: str, near: str | None, pet: str | None) -> dict | None:
+        """The best activity row for farming an item (steps_per_item doesn't depend on how many), cached for the
+        current top-level call so materials shared by many recipes (wheat, milk) are ranked once."""
+        key, cache = ("farm", item_id, near, pet), self._supply_cache
+        if cache is not None and key in cache:
+            return cache[key]
+        if not any(x["kind"] == "activity" for x in self.gd.item_sources.get(item_id, [])):
+            best = None
+        else:
+            ranked = self.rank_activities(item_id, top=1, pet=pet, near=near, drops_only=True)["ranking"]
+            best = ranked[0] if ranked else None
+        if cache is not None:
+            cache[key] = best
+        return best
+
     def _supply_steps(self, item_id: str, count: int, near: str | None, pet: str | None) -> dict | None:
         """Cheapest way to get `count` more of an item: farming it (rank_activities) or crafting it (plan_recipe,
         which also farms the missing materials). None if the character can't get it either way."""
@@ -1182,12 +1197,10 @@ class Service:
         busy.add(item_id)
         try:
             gd, opts = self.gd, []
-            farmable = any(x["kind"] == "activity" for x in gd.item_sources.get(item_id, []))
-            ranked = (self.rank_activities(item_id, top=1, pet=pet, near=near, drops_only=True)["ranking"]
-                      if farmable else [])
-            if ranked:
-                opts.append({"how": f"{ranked[0]['activity']} @ {ranked[0]['location']}",
-                             "steps": round(ranked[0]["steps_per_item"] * count)})
+            best_farm = self._farm_rate(item_id, near, pet)
+            if best_farm:
+                opts.append({"how": f"{best_farm['activity']} @ {best_farm['location']}",
+                             "steps": round(best_farm["steps_per_item"] * count), "farm": best_farm})
             for src in gd.item_sources.get(item_id, []):
                 if src["kind"] != "recipe":
                     continue
@@ -1229,7 +1242,7 @@ class Service:
                 got = [(g, i) for i in cheap if (g := self._supply_steps(i, short, near, pet))]
                 if got:
                     g, i = min(got, key=lambda x: x[0]["steps"])
-                    row["get"] = {"item": gd.name(i), **g}
+                    row["get"] = {"item": gd.name(i), "how": g["how"], "steps": g["steps"]}
                     total += g["steps"]
                 else:
                     row["get"] = None
@@ -1948,8 +1961,10 @@ class Service:
                     pick["gather"] = {"craft": how["how"][7:-1], "steps_for_shortfall": how["steps"]}
                     gather_total += how["steps"]
                 else:
-                    ranked = self.rank_activities(pick["id"], top=1, pet=pet, near=near_name, quantity=pick["short"])
-                    best = ranked["ranking"][0]
+                    best = how["farm"]
+                    if not self._supplying:  # top-level plan: rank again for this quantity, counting travel
+                        best = self.rank_activities(pick["id"], top=1, pet=pet, near=near_name,
+                                                    quantity=pick["short"])["ranking"][0]
                     farm = round(best["steps_per_item"] * pick["short"])
                     pick["gather"] = {**best, "steps_for_shortfall": farm}
                     gather_total += farm
