@@ -148,9 +148,11 @@ def plan_achievements(targets: list[int] | None = None, only: list[str] | None =
                       pet: str | None = "auto") -> dict:
     """Order the achievements the user hasn't unlocked by achievement points per step. Each gets a step estimate
     from its parsed goals (actions, drops, crafts, kinds of items to collect, stacks, levels) with the best owned
-    loadouts, plus the levelling it still needs; levels reached for one achievement count for the later ones, and
-    walking goals (total steps, character level) complete by themselves as steps add up. Each row: points, steps,
-    how, levelling, running total of steps and points. targets: point totals to report when they're reached
+    loadouts, plus the levelling it still needs. A grind also scores the share of other achievements it advances
+    (the same activity's actions and drops, crafts, XP toward their levels), and that progress is credited once
+    it's chosen; levels reached count for later ones, and walking goals (total steps, character level) complete
+    by themselves as steps add up. Each row: points, steps, how, levelling, also_advances, running total of steps
+    and points. targets: point totals to report when they're reached
     (e.g. [180, 190] for the buckler and bandolier). only: plan just these achievements. Achievements it can't
     estimate (eggs, coins, shop items, one-off actions) are listed with why. Slow: a few minutes for all of them."""
     return s().plan_achievements(targets, only, pet)

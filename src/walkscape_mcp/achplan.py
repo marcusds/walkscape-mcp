@@ -1,11 +1,12 @@
-"""Order the remaining achievements by achievement points per step.
+"""Order the remaining achievements by achievement points per step, crediting what each grind also advances.
 
 Each achievement's parsed goals (wikidata.py) get a step estimate from the existing tools: steps per action or per
-drop with the best owned loadout, plan_recipe / farming for items, the best XP rate for levels. Skill levels an
-activity needs count as prerequisites. A greedy pass then repeatedly takes the achievement with the most points
-per step, where the steps include levelling still needed at that point in the plan; levels reached earlier are
-shared, and walking goals (total steps, character level) complete by themselves as the plan's steps add up.
-This is a heuristic order, not a proven optimum.
+drop with the best owned loadout, plan_recipe / farming for items, the best XP rate for levels. Each estimate keeps
+the activity (or recipe) it runs and for how many steps. The plan then repeatedly takes the achievement with the
+most points per step, where a grind's value also counts the share of other achievements it advances (the same
+activity's action counts and drops, crafts, and XP toward levels they need). Once taken, everything it produced
+is credited: other goals shrink, XP raises levels, walking goals (total steps, character level) complete as steps
+add up. Levels reached are shared. This is a heuristic order, not a proven optimum.
 """
 
 from __future__ import annotations
@@ -18,10 +19,12 @@ from dataclasses import replace
 from .engine import GEAR_DEPENDENT_REQS, check_all, drop_report
 from .gamedata import norm
 from .optimizer import Objective
-from .player import CHAR_STEPS, SKILL_XP
+from .player import CHAR_STEPS, SKILL_XP, skill_level
 
 CANDIDATES = 8  # activities/recipes tried per goal (the most likely ones first)
 PASSIVE = ("total_steps", "character_level")
+LINEAR = ("actions", "actions_keyword", "gain_item", "gain_keyword", "craft_item", "craft_keyword", "craft_skill",
+          "have_item", "stack")  # goals whose cost scales with how many are left
 
 
 class NotEstimated(Exception):
@@ -34,6 +37,7 @@ class AchievementPlanner:
         self._metrics: dict = {}
         self._xp_rates: dict = {}
         self._stack: dict = {}
+        self._drops: dict = {}
         near = svc._near(None)
         self.near = self.gd.locations[near]["name"] if near else None
 
@@ -64,12 +68,25 @@ class AchievementPlanner:
                 self._metrics[key] = self.s._best_loadout(aid, obj, pet=self.pet)
         return self._metrics[key]
 
+    def _drop_rates(self, ev) -> dict[str, tuple[float, float]]:
+        """item id -> (per step, fine per step) for an evaluated loadout."""
+        key = id(ev)
+        if key not in self._drops:
+            self._drops[key] = (ev, {d["id"]: (d["per_1000_steps"] / 1000,
+                                               1 / d["steps_per_fine"] if "steps_per_fine" in d else 0.0)
+                                     for d in drop_report(ev, 10_000)})
+        return self._drops[key][1]
+
     def supply(self, iid: str, count: int) -> dict | None:
         """Cheapest way to get `count` of an item, levelling into a recipe or activity if needed:
         {"steps", "how", "levels"}."""
         s, gd = self.s, self.gd
         if c := s._supply_steps(iid, count, self.near, self.pet):
-            return {"steps": c["steps"], "how": c["how"], "levels": {}}
+            segs = []
+            if farm := c.get("farm"):  # farmed: the activity also drops other things worth crediting
+                aid = gd.resolve(farm["activity"], "activity")
+                segs = [({"aid": aid, "ev": self._eval(aid, Objective("item", iid))[2]}, c["steps"])]
+            return {"steps": c["steps"], "how": c["how"], "levels": {}, "segs": segs}
         rows = []
         for src in gd.item_sources.get(iid, []):
             if src["kind"] not in ("recipe", "activity"):
@@ -85,12 +102,14 @@ class AchievementPlanner:
                     ev = self._eval(src["id"], Objective("item", iid), levels)[2]
                     steps = count * Objective("item", iid).value(ev)
             if math.isfinite(steps):
-                rows.append((steps + sum(self.level_steps(k, self.p.skill_levels.get(k, 1), v)
+                rows.append((steps + sum(self.level_steps(k, self.p.skill_xp.get(k, 0), v)
                                          for k, v in levels.items()), steps, levels, src["id"]))
         if not rows:
             return None
         _, steps, levels, aid = min(rows, key=lambda r: r[0])
-        return {"steps": steps, "how": gd.activity_like(aid)["name"], "levels": levels}
+        segs = [({"aid": aid, "ev": self._eval(aid, Objective("item", iid), levels)[2]}, steps)] \
+            if aid in gd.activities else []
+        return {"steps": steps, "how": gd.activity_like(aid)["name"], "levels": levels, "segs": segs}
 
     def prereqs(self, aid: str) -> tuple[dict[str, int], list[str]]:
         """Skill levels the activity needs above the character's, and other requirements it can't meet."""
@@ -117,98 +136,139 @@ class AchievementPlanner:
         out.sort(key=lambda t: (sum(t[1].values()), self.s._context(t[0], None).required_level))
         return out[:CANDIDATES]
 
-    def xp_rate(self, skill: str) -> tuple[float, str]:
-        """Best XP per step in a skill with activities or recipes the character can do now (recipes include the
-        steps to farm their materials)."""
+    def xp_rate(self, skill: str) -> dict:
+        """Best way to gain XP in a skill with activities or recipes the character can do now (recipes include the
+        steps to farm their materials): {"rate", "how", "seg"} where seg is what one step of it produces."""
         if skill in self._xp_rates:
             return self._xp_rates[skill]
-        gd, best = self.gd, (0.0, "")
+        gd, best = self.gd, {"rate": 0.0, "how": "", "seg": None}
         doable = [(a, self.s._context(a, None).required_level) for a in list(gd.activities) + list(gd.recipes)
                   if (gd.activity_like(a).get("relatedSkillsList") or [None])[0] == skill
                   and not any(self.prereqs(a))]
         acts = sorted((x for x in doable if x[0] in gd.activities), key=lambda x: -x[1])[:3]
         recs = sorted((x for x in doable if x[0] in gd.recipes), key=lambda x: -x[1])[:3]
         for aid, _ in acts:
-            ctx, lo, ev = self._eval(aid, Objective("xp", skill))
+            ev = self._eval(aid, Objective("xp", skill))[2]
             rate = ev.metrics["xp_per_step"].get(skill, 0)
-            if rate > best[0]:
-                best = (rate, gd.activity_like(aid)["name"])
+            if rate > best["rate"]:
+                best = {"rate": rate, "how": gd.activity_like(aid)["name"], "seg": {"aid": aid, "ev": ev}}
         for rid, _ in recs:
-            ctx, lo, ev = self._eval(rid, Objective("xp", skill))
+            ev = self._eval(rid, Objective("xp", skill))[2]
             xps = ev.metrics["xp_per_step"].get(skill, 0)
             if xps <= 0:
                 continue
             plan = self.s.plan_recipe(rid, 100, self.near, self.pet)
-            if "total_steps_leaves_out" in plan:
+            if "total_steps_leaves_out" in plan or not plan["total_steps"]:
                 continue
-            per_craft = ev.metrics["steps_per_action"]
-            xp_per_craft = xps * per_craft
-            rate = xp_per_craft * plan["completions"] / plan["total_steps"] if plan["total_steps"] else 0
-            if rate > best[0]:
-                best = (rate, f"{gd.activity_like(rid)['name']} (materials farmed)")
+            crafts_per_step = plan["completions"] / plan["total_steps"]
+            rate = xps * ev.metrics["steps_per_action"] * crafts_per_step
+            if rate > best["rate"]:
+                best = {"rate": rate, "how": f"{gd.activity_like(rid)['name']} (materials farmed)",
+                        "seg": {"rid": rid, "crafts_per_step": crafts_per_step}}
         self._xp_rates[skill] = best
         return best
 
-    def level_steps(self, skill: str, frm: int, to: int) -> float:
-        if to <= frm:
+    def level_steps(self, skill: str, xp_now: float, to: int) -> float:
+        need = SKILL_XP[to - 1] - xp_now
+        if need <= 0:
             return 0.0
-        have = max(SKILL_XP[frm - 1], self.p.skill_xp.get(skill, 0) if frm == self.p.skill_levels.get(skill, 1) else 0)
-        rate, _ = self.xp_rate(skill)
-        if rate <= 0:
-            return math.inf
-        return (SKILL_XP[to - 1] - have) / rate
+        rate = self.xp_rate(skill)["rate"]
+        return need / rate if rate > 0 else math.inf
 
     # ---------- goals ----------
 
+    def _targets(self, g: dict) -> dict:
+        """What a goal counts, resolved once: {"aids"} for action goals, {"items", "fine", "skill", "akw"} for
+        drops/items, {"skill"} or {"items"} for crafts."""
+        if "_targets" in g:
+            return g["_targets"]
+        gd, s, t = self.gd, self.s, g["type"]
+        items_with = lambda kid: {i for i, it in gd.items.items() if kid in (it.get("keywords") or [])}
+        out: dict = {}
+        if t == "actions":
+            out["aids"] = {gd.resolve(g["activity"], "activity")}
+        elif t == "actions_keyword":
+            kid = s._keyword_id(g["keyword"])
+            out["aids"] = {a for a, x in gd.activities.items() if kid in (x.get("keywords") or [])}
+        elif t in ("gain_item", "gain_keyword", "have_item", "stack", "craft_item", "craft_keyword"):
+            iid, kid = s._item_or_keyword(g.get("item") or g.get("keyword") or "")
+            ids = {iid} if iid else items_with(kid) if kid else set()
+            if not ids and norm(g.get("keyword") or "") == "material":
+                ids = {i for i, it in gd.items.items() if it.get("type") == "material"}
+            out = {"items": ids, "fine": bool(g.get("fine")), "skill": g.get("skill"),
+                   "akw": s._keyword_id(g.get("activity_keyword"))}
+        elif t == "craft_skill":
+            out["skill"] = g["skill"]
+        g["_targets"] = out
+        return out
+
+    def produced(self, g: dict, seg: dict, steps: float) -> float:
+        """How many of a goal `steps` of a segment (an activity with its loadout, or a recipe) produce."""
+        t, tg, gd = g["type"], self._targets(g), self.gd
+        if "rid" in seg:  # crafting: count crafts toward craft goals
+            crafts = steps * seg["crafts_per_step"]
+            r = gd.activity_like(seg["rid"])
+            if t == "craft_skill":
+                return crafts if (r.get("relatedSkillsList") or [None])[0] == tg["skill"] else 0.0
+            if t in ("craft_item", "craft_keyword") and set(r.get("itemRewards") or {}) & tg["items"]:
+                return crafts
+            return 0.0
+        aid, ev = seg["aid"], seg["ev"]
+        a = gd.activities.get(aid) or {}
+        if t in ("actions", "actions_keyword"):
+            return steps / ev.metrics["steps_per_action"] if aid in tg["aids"] else 0.0
+        if t in ("gain_item", "gain_keyword", "have_item", "stack"):
+            if tg.get("skill") and (a.get("relatedSkillsList") or [None])[0] != tg["skill"]:
+                return 0.0
+            if tg.get("akw") and tg["akw"] not in (a.get("keywords") or []):
+                return 0.0
+            rates = self._drop_rates(ev)
+            return steps * sum(r[1] if tg["fine"] else r[0] for i, r in rates.items() if i in tg["items"])
+        return 0.0
+
     def goal(self, g: dict, n: int) -> dict:
-        """{"steps", "how", "levels"} for n more of a goal; NotEstimated if it can't be estimated."""
+        """{"steps", "how", "levels", "segs", "per_unit"} for n more of a goal. segs are (activity or recipe, steps)
+        the steps are spent on, where known; per_unit is steps per unit for goals whose cost scales with the count;
+        "left" overrides n when fewer are needed (a stack already partly held). NotEstimated if it can't be
+        estimated."""
         gd, s, t = self.gd, self.s, g["type"]
         items_with = lambda kid: [i for i, it in gd.items.items() if kid in (it.get("keywords") or [])]
         if n <= 0:
-            return {"steps": 0, "how": "done", "levels": {}}
+            return {"steps": 0, "how": "done", "levels": {}, "segs": [], "per_unit": 0}
         if t in ("actions", "actions_keyword"):
-            if t == "actions":
-                aids = [gd.resolve(g["activity"], "activity")]
-            else:
-                kid = s._keyword_id(g["keyword"])
-                aids = [a for a, x in gd.activities.items() if kid in (x.get("keywords") or [])]
-            return self._best([(aid, lv, n * self._eval(aid, Objective("actions"), lv)[2].metrics["steps_per_action"])
-                               for aid, lv in self._candidates(aids)])
+            rows = []
+            for aid, lv in self._candidates(self._targets(g)["aids"]):
+                ev = self._eval(aid, Objective("actions"), lv)[2]
+                rows.append((aid, lv, n * ev.metrics["steps_per_action"], {"aid": aid, "ev": ev}))
+            return self._best(rows, n)
         if t in ("gain_item", "gain_keyword"):
-            iid, kid = s._item_or_keyword(g.get("item") or g.get("keyword") or "")
-            ids = [iid] if iid else items_with(kid) if kid else []
-            if not ids and norm(g.get("keyword") or "") == "material":
-                ids = [i for i, it in gd.items.items() if it.get("type") == "material"]
-            if not ids:
+            tg = self._targets(g)
+            if not tg["items"]:
                 raise NotEstimated(f"unknown item {g.get('item') or g.get('keyword')}")
-            aids = [x["id"] for i in ids for x in gd.item_sources.get(i, []) if x["kind"] == "activity"]
-            if sk := g.get("skill"):
-                aids = [a for a in aids if (gd.activities[a].get("relatedSkillsList") or [None])[0] == sk]
-            if akw := s._keyword_id(g.get("activity_keyword")):
-                aids = [a for a in aids if akw in (gd.activities[a].get("keywords") or [])]
-            rows, fine, want = [], bool(g.get("fine")), set(ids)
+            aids = [x["id"] for i in tg["items"] for x in gd.item_sources.get(i, []) if x["kind"] == "activity"]
+            iid = next(iter(tg["items"])) if len(tg["items"]) == 1 else None
+            rows = []
             for aid, lv in self._candidates(aids):
-                obj = Objective("fine_item" if fine else "item", iid) if iid else Objective("reward_rolls")
-                ev = self._eval(aid, obj, lv)[2]
-                per_1000 = sum((1000 / d["steps_per_fine"] if "steps_per_fine" in d else 0) if fine
-                               else d["per_1000_steps"] for d in drop_report(ev, 10_000) if d["id"] in want)
-                if per_1000 > 0:
-                    rows.append((aid, lv, n * 1000 / per_1000))
-            return self._best(rows)
+                obj = Objective("fine_item" if tg["fine"] else "item", iid) if iid else Objective("reward_rolls")
+                seg = {"aid": aid, "ev": self._eval(aid, obj, lv)[2]}
+                per_step = self.produced(g, seg, 1.0)
+                if per_step > 0:
+                    rows.append((aid, lv, n / per_step, seg))
+            return self._best(rows, n)
         if t in ("craft_item", "craft_keyword", "craft_skill"):
+            tg = self._targets(g)
             if t == "craft_skill":
                 rids = [r for r in gd.recipes if (gd.activity_like(r).get("relatedSkillsList") or [None])[0] == g["skill"]]
             else:
-                iid, kid = s._item_or_keyword(g.get("item") or g.get("keyword") or "")
-                ids = {iid} if iid else set(items_with(kid)) if kid else set()
-                rids = [x["id"] for i in ids for x in gd.item_sources.get(i, []) if x["kind"] == "recipe"]
+                rids = [x["id"] for i in tg["items"] for x in gd.item_sources.get(i, []) if x["kind"] == "recipe"]
             rows = []
             for rid, lv in self._candidates(rids):
                 with self._at_levels(lv):
                     plan = s.plan_recipe(rid, n, self.near, self.pet)
-                if "total_steps_leaves_out" not in plan:
-                    rows.append((rid, lv, plan["total_steps"]))
-            return self._best(rows)
+                if "total_steps_leaves_out" not in plan and plan["total_steps"]:
+                    rows.append((rid, lv, plan["total_steps"],
+                                 {"rid": rid, "crafts_per_step": plan["completions"] / plan["total_steps"]}))
+            return self._best(rows, n)
         if t == "craft_quality":
             kid = s._keyword_id(g.get("keyword"))
             ids = [i for i in (items_with(kid) if kid else gd.items) if gd.items[i].get("type") == "crafted"]
@@ -218,21 +278,22 @@ class AchievementPlanner:
                 with self._at_levels(lv):
                     q = s.craft_quality(rid, g["quality"], pet=self.pet)
                 if q.get("expected_steps"):
-                    rows.append((rid, lv, q["expected_steps"]))
+                    rows.append((rid, lv, q["expected_steps"],
+                                 {"rid": rid, "crafts_per_step": q["expected_items_crafted"] / q["expected_steps"]}))
             if not rows:
                 raise NotEstimated(f"no {g.get('keyword') or ''} recipe reaches {g['quality']} at your levels".strip())
-            return self._best(rows, note="crafting steps only; materials extra")
+            return {**self._best(rows, n, note="crafting steps only; materials extra"), "per_unit": None}
         if t in ("skill_level", "all_skills"):
             skills = [g["skill"]] if t == "skill_level" else list(gd.skills)
-            return {"steps": 0, "how": "levelling", "levels": {k: n for k in skills}}
+            return {"steps": 0, "how": "levelling", "levels": {k: n for k in skills}, "segs": [], "per_unit": 0}
         if t in ("equip_keyword", "hold_distinct"):
             kid = s._keyword_id(g["keyword"])
             ids = items_with(kid) if kid else []
             owned = [i for i in ids if i in self.p.all_item_ids]
             short = n - len(owned) if t == "hold_distinct" or norm(g["keyword"]) != "ring" else 0
             if short <= 0:
-                return {"steps": 0, "how": "already own enough", "levels": {}}
-            costs = sorted((c["steps"] + sum(self.level_steps(k, self.p.skill_levels.get(k, 1), v)
+                return {"steps": 0, "how": "already own enough", "levels": {}, "segs": [], "per_unit": 0}
+            costs = sorted((c["steps"] + sum(self.level_steps(k, self.p.skill_xp.get(k, 0), v)
                                              for k, v in c["levels"].items()), gd.name(i), c)
                            for i in ids if i not in owned if (c := self.supply(i, 1)))
             if len(costs) < short:
@@ -243,7 +304,8 @@ class AchievementPlanner:
             for _, _, c in pick:
                 for k, v in c["levels"].items():
                     levels[k] = max(levels.get(k, 0), v)
-            return {"steps": sum(c["steps"] for _, _, c in pick),
+            return {"steps": sum(c["steps"] for _, _, c in pick), "per_unit": None,
+                    "segs": [x for _, _, c in pick for x in c["segs"]],
                     "how": "; ".join(f"{name} via {c['how']}" for _, name, c in pick), "levels": levels}
         if t == "stack":
             key = (g["keyword"], g["n"])
@@ -252,27 +314,31 @@ class AchievementPlanner:
             best = (self._stack[key]["ranking"] or [None])[0]
             if not best:
                 raise NotEstimated(f"no {g['keyword']} obtainable now")
-            return {"steps": best["steps"], "how": f"{best['item']} via {best['how']}", "levels": {}}
+            g["_targets"] = {**self._targets(g), "items": {gd.resolve(best["item"], "item")}}  # one stack counts
+            return {"steps": best["steps"], "how": f"{best['item']} via {best['how']}", "levels": {}, "segs": [],
+                    "per_unit": best["steps"] / max(best["short"], 1), "left": best["short"]}
         if t == "have_item":
             iid = gd.resolve(g["item"], "item")
             c = self.p.item_counts.get(iid, (0, 0))
             short = n - (c[1] if g.get("fine") else max(sum(c), int(iid in self.p.all_item_ids)))
             if short <= 0:
-                return {"steps": 0, "how": "already have it", "levels": {}}
+                return {"steps": 0, "how": "already have it", "levels": {}, "segs": [], "per_unit": 0}
             if g.get("fine"):
                 raise NotEstimated(f"fine {gd.name(iid)} (fine crafting chances aren't modelled here)")
             c = self.supply(iid, short)
             if not c:
                 raise NotEstimated(f"{gd.name(iid)}: no activity or recipe drops or makes it (shops aren't modelled)")
-            return {"steps": c["steps"], "how": f"{gd.name(iid)} via {c['how']}", "levels": c["levels"]}
+            return {"steps": c["steps"], "how": f"{gd.name(iid)} via {c['how']}", "levels": c["levels"],
+                    "segs": c["segs"], "per_unit": c["steps"] / short, "left": short}
         if t == "equip_item":
             iid = gd.resolve(g["item"], "item")
             if iid in self.p.all_item_ids:
-                return {"steps": 0, "how": "already own it", "levels": {}}
+                return {"steps": 0, "how": "already own it", "levels": {}, "segs": [], "per_unit": 0}
             c = self.supply(iid, 1)
             if not c:
                 raise NotEstimated(f"{gd.name(iid)}: no activity or recipe drops or makes it (shops aren't modelled)")
-            return {"steps": c["steps"], "how": f"{gd.name(iid)} via {c['how']}", "levels": c["levels"]}
+            return {"steps": c["steps"], "how": f"{gd.name(iid)} via {c['how']}", "levels": c["levels"],
+                    "segs": c["segs"], "per_unit": None}
         if t == "visit":
             lid = gd.resolve(g["location"], "location")
             src = s._near(None)
@@ -281,7 +347,8 @@ class AchievementPlanner:
             d = s._base_distances(src)[0].get(lid)
             if d is None:
                 raise NotEstimated(f"can't reach {gd.locations[lid]['name']} yet")
-            return {"steps": d, "how": f"walk to {gd.locations[lid]['name']} (base distance)", "levels": {}}
+            return {"steps": d, "how": f"walk to {gd.locations[lid]['name']} (base distance)", "levels": {},
+                    "segs": [], "per_unit": None}
         raise NotEstimated({"other": "not modelled (luck, one-off actions or in-game counters)",
                             "wealth": "coin income isn't modelled", "explore_region": "exploration isn't tracked",
                             "while_skill": "needs a specific loadout; check with optimize_loadout",
@@ -291,16 +358,16 @@ class AchievementPlanner:
                             "have_quality": "crafted-quality odds for this item aren't modelled",
                             "craft_distinct": "distinct recipes aren't modelled"}.get(t, f"{t} isn't modelled"))
 
-    def _best(self, rows, note: str | None = None) -> dict:
-        """Cheapest (aid, levels, steps) including the levelling it needs from the character's current levels."""
+    def _best(self, rows, n: int, note: str | None = None) -> dict:
+        """Cheapest (aid, levels, steps, seg) including the levelling it needs from the character's current XP."""
         rows = [r for r in rows if math.isfinite(r[2])]
         if not rows:
             raise NotEstimated("no activity or recipe the character can use (or level into) drops or makes it")
-        cur = self.p.skill_levels
-        aid, levels, steps = min(rows, key=lambda r: r[2] + sum(self.level_steps(k, cur.get(k, 1), v)
-                                                                 for k, v in r[1].items()))
+        xp = self.p.skill_xp
+        aid, levels, steps, seg = min(rows, key=lambda r: r[2] + sum(self.level_steps(k, xp.get(k, 0), v)
+                                                                      for k, v in r[1].items()))
         how = self.gd.activity_like(aid)["name"] + (f" ({note})" if note else "")
-        return {"steps": steps, "how": how, "levels": levels}
+        return {"steps": steps, "how": how, "levels": levels, "segs": [(seg, steps)], "per_unit": steps / n}
 
     # ---------- the plan ----------
 
@@ -312,32 +379,89 @@ class AchievementPlanner:
                 continue
             goals = a.get("goals") or []
             done_counts = [int(x.replace(",", "")) for x, _ in
-                           re.findall(r"([\d,.]+)\s*/\s*([\d,.]+)", recorded.get(name, {}).get("progress") or "")]
+                           re.findall(r"([\d,]+)\s*/\s*([\d,]+)", recorded.get(name, {}).get("progress") or "")]
             if goals and all(g["type"] in PASSIVE for g in goals):
                 target = max(CHAR_STEPS[g["n"] - 1] if g["type"] == "character_level" else g["n"] for g in goals)
                 passive[name] = {"points": a["points"], "at_steps": target}
                 continue
-            est, reasons = [], []
-            for i, g in enumerate(goals):
-                n = g["n"] - (done_counts[i] if i < len(done_counts) and g["type"] not in ("skill_level",) else 0)
+            rows, reasons = [], []
+            for i, g0 in enumerate(goals):
+                g = dict(g0)
+                n = g["n"] - (done_counts[i] if i < len(done_counts) and g["type"] in LINEAR else 0)
                 try:
-                    est.append(self.goal(g, n))
-                except NotEstimated as e:
-                    reasons.append(f"{g['text']}: {e}")
-                except KeyError as e:
+                    est = self.goal(g, n)
+                    rows.append({"g": g, "left": max(est.get("left", n), 0), "est": est})
+                except (NotEstimated, KeyError) as e:
                     reasons.append(f"{g['text']}: {e}")
             if reasons or not goals:
                 skipped.append({"name": name, "points": a["points"], "why": reasons or ["no goals parsed"]})
                 continue
             levels: dict[str, int] = {}
-            for e in est:
-                for k, v in e["levels"].items():
+            for r in rows:
+                for k, v in r["est"]["levels"].items():
                     levels[k] = max(levels.get(k, 0), v)
-            tasks[name] = {"points": a["points"], "steps": sum(e["steps"] for e in est), "levels": levels,
-                           "how": [e["how"] for e in est if e["how"] not in ("done",)]}
+            tasks[name] = {"points": a["points"], "goals": rows, "levels": levels}
 
-        state = dict(self.p.skill_levels)
-        walked, points, order = self.p.steps, unlocked_points, []
+        xp = dict(self.p.skill_xp)
+        walked, points, order = float(self.p.steps), unlocked_points, []
+
+        def goal_cost(r) -> float:
+            if r["left"] <= 0:
+                return 0.0
+            per = r["est"]["per_unit"]
+            return r["left"] * per if per is not None and r["g"]["type"] in LINEAR else r["est"]["steps"]
+
+        def task_cost(t, xp_state) -> tuple[float, float]:
+            lvl = sum(self.level_steps(k, xp_state.get(k, 0), v) for k, v in t["levels"].items())
+            return sum(goal_cost(r) for r in t["goals"]) + lvl, lvl
+
+        def segments(t, xp_state):
+            """(seg, steps) the task spends: each goal's activity for what's left, and the levelling."""
+            out = []
+            for r in t["goals"]:
+                c, full = goal_cost(r), r["est"]["steps"]
+                if c > 0 and full:
+                    out += [(seg, steps * c / full) for seg, steps in r["est"]["segs"]]
+            for k, v in t["levels"].items():
+                steps = self.level_steps(k, xp_state.get(k, 0), v)
+                seg = self.xp_rate(k)["seg"]
+                if seg and 0 < steps < math.inf:
+                    out.append((seg, steps))
+            return out
+
+        def xp_from(segs) -> dict[str, float]:
+            gained: dict[str, float] = {}
+            for seg, steps in segs:
+                if "ev" in seg:
+                    for k, v in seg["ev"].metrics["xp_per_step"].items():
+                        gained[k] = gained.get(k, 0) + v * steps
+            return gained
+
+        def credit(t_name, segs, apply: bool) -> dict[str, float]:
+            """Share of each other task's remaining cost the segments cover; applied to their goals if apply."""
+            shares = {}
+            gained = xp_from(segs)
+            xp_after = {k: xp.get(k, 0) + gained.get(k, 0) for k in set(xp) | set(gained)}
+            for name, u in tasks.items():
+                if name == t_name:
+                    continue
+                before = task_cost(u, xp)[0]
+                if not before or not math.isfinite(before):
+                    continue
+                cut = []
+                for r in u["goals"]:
+                    got = sum(self.produced(r["g"], seg, steps) for seg, steps in segs) if r["g"]["type"] in LINEAR else 0
+                    cut.append(got)
+                saved = sum(min(got, r["left"]) * (r["est"]["per_unit"] or 0) for got, r in zip(cut, u["goals"]))
+                saved += task_cost(u, xp)[1] - task_cost(u, xp_after)[1]
+                if saved > 0:
+                    shares[name] = min(1.0, saved / before)
+                if apply:
+                    for got, r in zip(cut, u["goals"]):
+                        r["left"] = max(0.0, r["left"] - got)
+            if apply:
+                xp.update(xp_after)
+            return shares
 
         def pass_walking():
             nonlocal points
@@ -350,24 +474,38 @@ class AchievementPlanner:
 
         pass_walking()
         while tasks:
-            def cost(t):
-                lvl = sum(self.level_steps(k, state.get(k, 1), v) for k, v in t["levels"].items())
-                return t["steps"] + lvl, lvl
-            scored = {name: cost(t) for name, t in tasks.items()}
-            name = max(tasks, key=lambda nm: tasks[nm]["points"] / max(scored[nm][0], 1))
-            t, (total, lvl) = tasks.pop(name), scored[name]
-            if not math.isfinite(total):
-                skipped.append({"name": name, "points": t["points"], "why": ["no XP source for a level it needs"]})
-                continue
-            ups = {k: f"{state.get(k, 1)} -> {v}" for k, v in t["levels"].items() if v > state.get(k, 1)}
+            scored = {}
+            for name, t in tasks.items():
+                cost, lvl = task_cost(t, xp)
+                if not math.isfinite(cost):
+                    continue
+                shares = credit(name, segments(t, xp), apply=False)
+                value = t["points"] + sum(tasks[u]["points"] * f for u, f in shares.items())
+                scored[name] = (value / max(cost, 1), cost, lvl)
+            if not scored:
+                for name, t in tasks.items():
+                    skipped.append({"name": name, "points": t["points"], "why": ["no XP source for a level it needs"]})
+                break
+            name = max(scored, key=lambda nm: scored[nm][0])
+            _, cost, lvl = scored[name]
+            t = tasks.pop(name)
+            ups = {k: f"{skill_level(xp.get(k, 0))} -> {v}" for k, v in t["levels"].items()
+                   if SKILL_XP[v - 1] > xp.get(k, 0)}
+            segs = segments(t, xp)
+            shares = credit(name, segs, apply=True)
             for k, v in t["levels"].items():
-                state[k] = max(state.get(k, 1), v)
-            walked += total
+                xp[k] = max(xp.get(k, 0), SKILL_XP[v - 1])
+            walked += cost
             points += t["points"]
-            order.append({"name": name, "points": t["points"], "steps": round(total),
-                          **({"levelling": {k: f"{v} ({self.xp_rate(k)[1]})" for k, v in ups.items()},
-                              "levelling_steps": round(lvl)} if ups else {}),
-                          "how": t["how"], "total_steps_walked": round(walked), "achievement_points": points})
+            row = {"name": name, "points": t["points"], "steps": round(cost),
+                   "how": [r["est"]["how"] for r in t["goals"] if r["est"]["how"] != "done"]}
+            if ups:
+                row["levelling"] = {k: f"{v} ({self.xp_rate(k)['how']})" for k, v in ups.items()}
+                row["levelling_steps"] = round(lvl)
+            advanced = {u: f"{f:.0%}" for u, f in sorted(shares.items(), key=lambda kv: -kv[1]) if f >= 0.05}
+            if advanced:
+                row["also_advances"] = advanced
+            order.append({**row, "total_steps_walked": round(walked), "achievement_points": points})
             pass_walking()
         for name, t in passive.items():
             order.append({"name": name, "points": t["points"], "steps": round(t["at_steps"] - walked),
@@ -380,6 +518,8 @@ class AchievementPlanner:
                                        f"({hit['total_steps_walked'] - self.p.steps:,} from now)") if hit else "not reached"
         return {"start": {"achievement_points": unlocked_points, "total_steps": self.p.steps},
                 "order": order, "milestones": milestones, "not_estimated": skipped,
-                "note": "Greedy by achievement points per step; levels needed are shared once reached. Steps are "
-                        "expected values without travel between activities, and loot luck can move them a lot. "
-                        "Progress recorded with remember_player_info is counted."}
+                "note": "Greedy by achievement points per step, where a grind also scores the share of other "
+                        "achievements it advances (same activity's actions and drops, crafts, XP toward their "
+                        "levels); that progress is then credited. Levels reached are shared. Steps are expected "
+                        "values without travel between activities, and loot luck can move them a lot. Progress "
+                        "recorded with remember_player_info is counted."}

@@ -42,6 +42,9 @@ def test_plan_achievements_shares_levelling(svc):
     # hunting is levelled once: whichever comes second only pays from where the first left off
     first, second = sorted([trap, hunter], key=lambda r: r["total_steps_walked"])
     assert first["levelling"]["hunting"].startswith("1 -> ")
+    # its hunting XP is credited to the other, which then needs less levelling
+    other = "Big Game Hunter" if first["name"] == "It's A Trap!" else "It's A Trap!"
+    assert other in first.get("also_advances", {})
     assert not second.get("levelling") or not second["levelling"]["hunting"].startswith("1 -> ")
     assert "Mordor" in " ".join(rows) and out["not_estimated"][0]["name"] == "Enter Sandman"
     assert [r["total_steps_walked"] for r in out["order"]] == sorted(r["total_steps_walked"] for r in out["order"])
