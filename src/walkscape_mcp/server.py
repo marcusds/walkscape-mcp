@@ -145,7 +145,7 @@ def achievements(show: str = "not_unlocked") -> dict:
 
 @mcp.tool()
 def plan_achievements(targets: list[int] | None = None, only: list[str] | None = None,
-                      pet: str | None = "auto") -> dict:
+                      pet: str | None = "auto", rare_egg_chance: float | None = None) -> dict:
     """Order the achievements the user hasn't unlocked by achievement points per step. Each gets a step estimate
     from its parsed goals (actions, drops, crafts, kinds of items to collect, stacks, levels, reputation, coins,
     eggs to hatch, a work-efficiency target) with the best owned loadouts, including the levelling or reputation
@@ -156,9 +156,11 @@ def plan_achievements(targets: list[int] | None = None, only: list[str] | None =
     chosen; walking goals (total steps, character level) complete by themselves as steps add up. Each row: points,
     steps, travel_steps and route, how, levelling, also_advances, running total of steps and points.
     targets: point totals to report when they're reached (e.g. [180, 190] for the buckler and bandolier).
-    only: plan just these achievements. Achievements it can't estimate are listed with why.
-    Slow: several minutes for all of them."""
-    return s().plan_achievements(targets, only, pet)
+    only: plan just these achievements. rare_egg_chance: the chance a found egg is rare (e.g. 0.01), which the
+    game data doesn't give; without it Rare Find isn't estimated. Coins count selling what grinds drop; eggs hatch
+    one at a time after their pet XP, so their points come later; shops are used only for what one visit stocks.
+    Achievements it can't estimate are listed with why. Slow: several minutes for all of them."""
+    return s().plan_achievements(targets, only, pet, rare_egg_chance)
 
 
 @mcp.tool()

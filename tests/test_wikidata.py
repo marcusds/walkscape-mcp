@@ -19,7 +19,8 @@ def test_achievement_goals_are_typed():
         {"type": "have_item", "item": "Saltrum", "fine": True, "n": 100},
         {"type": "have_quality", "keyword": "Spectral Tool", "quality": "eternal", "n": 1}]
     assert goals("Hatch a Mummy egg [1]") == [{"type": "hatch", "item": "Mummy egg", "n": 1}]
-    assert goals("Claim a rare Pet egg [1]") == [{"type": "other", "n": 1}]
+    assert goals("Claim a rare Pet egg [1]") == [{"type": "rare_egg", "n": 1}]
+    assert goals("Drop an item. [1]") == [{"type": "other", "n": 1}]
 
 
 def test_achievement_goal_views(svc):
@@ -53,9 +54,22 @@ def test_plan_achievements_shares_levelling(svc):
 
 def test_plan_levels_reputation_and_counts_coins(svc):
     out = svc.plan_achievements(only=["Overprepared", "All The Things I Could Do", "Enter Sandman"])
-    rows = {r["name"]: r for r in out["order"]}
+    rows = {}
+    for r in out["order"]:  # an egg's second row is its hatching
+        rows.setdefault(r["name"], r)
     if svc._player.reputation.get("jarvonia", 0) < 100:
         assert "jarvonia reputation" in rows["Overprepared"]["levelling"]
     assert "coin drops" in rows["All The Things I Could Do"]["how"][0]
     assert rows["Enter Sandman"]["how"][0].startswith("1 Mummy egg via")
     assert all(r.get("travel_steps", 0) >= 0 for r in out["order"]) and out["travel_factor"] > 0
+
+
+def test_plan_hatches_eggs_later_and_takes_a_rare_chance(svc):
+    out = svc.plan_achievements(only=["Enter Sandman", "Rare Find"], rare_egg_chance=0.05)
+    rows = [r for r in out["order"] if r["name"] == "Enter Sandman"]
+    found, hatched = rows[0], rows[-1]
+    assert "points_when_hatched" in found and hatched["how"] == "egg hatched"
+    assert hatched["total_steps_walked"] >= found["total_steps_walked"] + 35_000 - 1
+    rare = next(r for r in out["order"] if r["name"] == "Rare Find")
+    assert rare["how"][0].startswith("about 20 eggs")
+    assert svc.plan_achievements(only=["Rare Find"])["not_estimated"][0]["name"] == "Rare Find"

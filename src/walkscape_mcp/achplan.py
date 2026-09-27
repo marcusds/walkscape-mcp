@@ -32,8 +32,11 @@ class NotEstimated(Exception):
 
 
 class AchievementPlanner:
-    def __init__(self, svc, pet: str | None = "auto"):
+    def __init__(self, svc, pet: str | None = "auto", rare_egg_chance: float | None = None):
         self.s, self.gd, self.p, self.pet = svc, svc.gd, svc._player, pet
+        self.rare_egg_chance = rare_egg_chance
+        self._real_hops: dict = {}
+        self._seen_base = self._seen_real = 0.0
         self._metrics: dict = {}
         self._xp_rates: dict = {}
         self._stack: dict = {}
@@ -54,7 +57,10 @@ class AchievementPlanner:
         return self._dists[a].get(b, math.inf)
 
     def travel_factor(self) -> float:
-        """Steps per base step with the character's best travel loadout, from one representative route."""
+        """Steps per base step with the character's best travel loadout: from the routes planned so far, or one
+        representative route before any."""
+        if self._seen_base:
+            return self._seen_real / self._seen_base
         if self._travel_factor is None:
             self._travel_factor = 1.0
             if self.start:
@@ -68,18 +74,37 @@ class AchievementPlanner:
                         pass
         return self._travel_factor
 
-    def route(self, groups: list[list[str]], start: str | None) -> tuple[float, str | None, list[str]]:
-        """Travel steps to visit each segment's stops (segments nearest-first, a segment's stops in order),
-        where it ends, and the stops' names."""
-        cur, total, names, groups = start, 0.0, [], [g for g in groups if g]
+    def route(self, groups: list[list[str]], start: str | None) -> tuple[float, str | None, list[tuple[str, str]]]:
+        """Estimated travel steps to visit each segment's stops (segments nearest-first, a segment's stops in
+        order), where it ends, and the hops."""
+        cur, total, hops, groups = start, 0.0, [], [g for g in groups if g]
         while groups:
             i = min(range(len(groups)), key=lambda k: self.dist(cur, groups[k][0]))
             for loc in groups.pop(i):
                 total += self.dist(cur, loc)
-                if loc != cur:
-                    names.append(self.gd.locations[loc]["name"])
+                if cur and loc != cur:
+                    hops.append((cur, loc))
                 cur = loc
-        return total * self.travel_factor(), cur, names
+        return total * self.travel_factor(), cur, hops
+
+    def real_travel(self, hops: list[tuple[str, str]]) -> float:
+        """Travel steps for the hops with plan_route's best single travel loadout per trip; also sharpens the
+        factor used to estimate other trips."""
+        total = 0.0
+        for a, b in hops:
+            if (a, b) not in self._real_hops:
+                base = self.dist(a, b)
+                try:
+                    r = self.s.plan_route(self.gd.locations[b]["name"], start=self.gd.locations[a]["name"])
+                    real = float(r["single_loadout"]["steps"])
+                except Exception:
+                    real = base * self.travel_factor()
+                self._real_hops[(a, b)] = real
+                if math.isfinite(base) and base > 0:
+                    self._seen_base += base
+                    self._seen_real += real
+            total += self._real_hops[(a, b)]
+        return total
 
     # ---------- shared estimates ----------
 
@@ -202,6 +227,19 @@ class AchievementPlanner:
                                      for d in drop_report(ev, 10_000)})
         return self._drops[key][1]
 
+    def _sell_value(self, iid: str, fine: bool = False) -> float:
+        if iid == "coins":
+            return 1.0
+        v = (self.gd.items.get(iid) or {}).get("itemValue") or {}
+        if v.get("currency") != "money":
+            return 0.0
+        return float((v.get("value") or {}).get("fine" if fine else "common") or 0)
+
+    def _coins_per_step(self, ev) -> float:
+        """Coins an activity makes per step: coin drops plus selling everything else it drops."""
+        return sum((rate - fine) * self._sell_value(i) + fine * self._sell_value(i, True)
+                   for i, (rate, fine) in self._drop_rates(ev).items())
+
     def supply(self, iid: str, count: int) -> dict | None:
         """Cheapest way to get `count` of an item, levelling into a recipe or activity if needed:
         {"steps", "how", "levels"}."""
@@ -270,7 +308,7 @@ class AchievementPlanner:
         are farmed."""
         p, gd = self.p, self.gd
         for x in sorted(self.s.shop_sources(iid), key=lambda x: x["price"]):
-            if not x["entry_met"]:
+            if not x["entry_met"] or count > x["stock"]:  # restocking isn't documented: one visit's stock only
                 continue
             price, where = x["price"] * count, f"{x['building']} @ {gd.locations[x['location']]['name']}"
             shop_seg = ({"locs": [x["location"]]}, 0.0)
@@ -408,8 +446,8 @@ class AchievementPlanner:
                    "akw": s._keyword_id(g.get("activity_keyword"))}
         elif t == "craft_skill":
             out["skill"] = g["skill"]
-        elif t == "wealth":  # coins dropped by activities (money loot rows); selling items isn't counted
-            out = {"items": {"coins"}, "fine": False, "skill": None, "akw": None}
+        elif t == "wealth":  # coins: dropped (money loot rows) or from selling what drops
+            out = {"items": {"coins"}, "fine": False, "skill": None, "akw": None, "value": True}
         g["_targets"] = out
         return out
 
@@ -430,6 +468,8 @@ class AchievementPlanner:
         a = gd.activities.get(aid) or {}
         if t in ("actions", "actions_keyword"):
             return steps / ev.metrics["steps_per_action"] if aid in tg["aids"] else 0.0
+        if t == "wealth":
+            return steps * self._coins_per_step(ev)
         if t in ("gain_item", "gain_keyword", "have_item", "stack"):
             if tg.get("skill") and (a.get("relatedSkillsList") or [None])[0] != tg["skill"]:
                 return 0.0
@@ -458,8 +498,29 @@ class AchievementPlanner:
             short = n - self.p.coins
             if short <= 0:
                 return {"steps": 0, "how": "already have the coins", "levels": {}, "segs": [], "per_unit": 0}
-            est = self.goal({**g, "type": "gain_keyword", "_targets": self._targets(g)}, short)
-            return {**est, "how": est["how"] + " (coin drops only; selling items isn't counted)", "left": short}
+            from .engine import Loadout, evaluate
+            quick = []  # rank every doable activity by coins per step with no gear, then optimize the best few
+            for aid in gd.activities:
+                if aid == "travelling" or any(self.prereqs(aid)):
+                    continue
+                for loc in gd.activity_locations(aid)[:1]:
+                    quick.append((self._coins_per_step(evaluate(s._context(aid, loc), Loadout())), aid))
+            rows = []
+            for _, aid in sorted(quick, reverse=True)[:5]:
+                seg = self._aseg(aid, Objective("reward_rolls"))
+                per_step = self._coins_per_step(seg["ev"])
+                if per_step > 0:
+                    rows.append((aid, {}, short / per_step, seg))
+            est = self._best(rows, short, note="selling what it drops, plus coin drops; sell at a general store")
+            return {**est, "left": short}
+        if t == "rare_egg":
+            if not self.rare_egg_chance:
+                raise NotEstimated("the chance an egg is rare isn't in the game data or on the wiki; pass "
+                                   "rare_egg_chance if you know it")
+            est = self.goal({"type": "hatch", "item": None, "n": 1, "text": ""}, 1)
+            eggs = 1 / self.rare_egg_chance
+            return {**est, "steps": est["per_unit"] * eggs, "per_unit": None, "hatch_steps": 0,
+                    "how": f"about {eggs:,.0f} eggs at a {self.rare_egg_chance:.2%} rare chance; " + est["how"]}
         if t == "hatch":
             eggs = {gd.resolve(g["item"], "item")} if g.get("item") else \
                 {i for i in gd.items for pet in gd.pets.values() if norm(pet.get("egg", {}).get("name", "")) == i}
@@ -475,9 +536,9 @@ class AchievementPlanner:
             steps, egg, est = min(rows, key=lambda r: r[0])
             pet = next(p for p in gd.pets.values() if norm(p.get("egg", {}).get("name", "")) == egg)
             hatch = (pet.get("levels") or [{}])[0].get("xp", 0)
-            return {**est, "steps": steps * n, "per_unit": steps,
+            return {**est, "steps": steps * n, "per_unit": steps, "hatch_steps": hatch * n,
                     "how": f"{n} {gd.name(egg)} via {est['how']}; each hatches after {hatch:,} steps as the active "
-                           "pet (alongside other grinds)"}
+                           "pet, one at a time, alongside other grinds"}
         if t in ("gain_item", "gain_keyword"):
             tg = g.get("_targets") or self._targets(g)
             if not tg["items"]:
@@ -904,12 +965,15 @@ class AchievementPlanner:
                 xp.update(xp_after)
             return shares
 
+        hatch_free = walked  # eggs hatch one at a time, as the active pet: when the incubating slot frees up
+
         def pass_walking():
             nonlocal points
             for name, t in sorted(passive.items(), key=lambda kv: kv[1]["at_steps"]):
                 if walked >= t["at_steps"]:
                     points += t["points"]
-                    order.append({"name": name, "points": t["points"], "steps": 0, "how": "comes with walking",
+                    order.append({"name": name, "points": t["points"], "steps": 0,
+                                  "how": t.get("how", "comes with walking"),
                                   "total_steps_walked": round(walked), "achievement_points": points})
                     del passive[name]
 
@@ -932,7 +996,10 @@ class AchievementPlanner:
                                     "why": ["can't reach where it's done, or no XP source for a level it needs"]})
                 break
             name = max(scored, key=lambda nm: scored[nm][0])
-            _, cost, lvl, travel, here, stops, segs = scored[name]
+            _, cost, lvl, travel, here, hops, segs = scored[name]
+            real = self.real_travel(hops)
+            cost += real - travel
+            travel = real
             t = tasks.pop(name)
             ups = {(f"{k[4:]} reputation" if k.startswith("rep:") else k):
                    f"{xp.get(k, 0):g} -> {v:g}" if k.startswith("rep:") else f"{skill_level(xp.get(k, 0))} -> {v}"
@@ -943,12 +1010,18 @@ class AchievementPlanner:
             for k, v in t["levels"].items():
                 xp[k] = max(xp.get(k, 0), self._need(k, v))
             walked += cost
-            points += t["points"]
+            hatch = sum(r["est"].get("hatch_steps", 0) for r in t["goals"])
             row = {"name": name, "points": t["points"], "steps": round(cost),
                    "how": [r["est"]["how"] for r in t["goals"] if r["est"]["how"] != "done"]}
+            if hatch:  # the points come when the egg hatches, after its steps as the active pet
+                hatch_free = max(hatch_free, walked) + hatch
+                passive[name] = {"points": t["points"], "at_steps": hatch_free, "how": "egg hatched"}
+                row["points_when_hatched"] = f"at {round(hatch_free):,} total steps"
+            else:
+                points += t["points"]
             if travel:
                 row["travel_steps"] = round(travel)
-                row["route"] = " → ".join(stops)
+                row["route"] = " → ".join(self.gd.locations[b]["name"] for _, b in hops)
             if ups:
                 row["levelling"] = {k: f"{v} ({how_up[k]})" for k, v in ups.items()}
                 row["levelling_steps"] = round(lvl)
@@ -957,10 +1030,12 @@ class AchievementPlanner:
                 row["also_advances"] = advanced
             order.append({**row, "total_steps_walked": round(walked), "achievement_points": points})
             pass_walking()
-        for name, t in passive.items():
+        for name, t in sorted(passive.items(), key=lambda kv: kv[1]["at_steps"]):
             order.append({"name": name, "points": t["points"], "steps": round(t["at_steps"] - walked),
-                          "how": "keep walking", "total_steps_walked": round(t["at_steps"]),
+                          "how": "keep walking" + (" (egg hatches)" if t.get("how") == "egg hatched" else ""),
+                          "total_steps_walked": round(t["at_steps"]),
                           "achievement_points": (points := points + t["points"])})
+            walked = max(walked, t["at_steps"])
         milestones = {}
         for target in targets:
             hit = next((o for o in order if o["achievement_points"] >= target), None)

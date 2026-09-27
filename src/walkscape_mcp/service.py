@@ -892,7 +892,7 @@ class Service:
         return out
 
     def plan_achievements(self, targets: list[int] | None = None, only: list[str] | None = None,
-                          pet: str | None = "auto") -> dict:
+                          pet: str | None = "auto", rare_egg_chance: float | None = None) -> dict:
         from .achplan import AchievementPlanner
 
         known = self.achievement_list()
@@ -907,7 +907,7 @@ class Service:
         if outer:
             self._supply_cache, self._supplying = {}, set()
         try:
-            return AchievementPlanner(self, pet).plan(known, recorded, unlocked, targets or [])
+            return AchievementPlanner(self, pet, rare_egg_chance).plan(known, recorded, unlocked, targets or [])
         finally:
             if outer:
                 self._supply_cache = None

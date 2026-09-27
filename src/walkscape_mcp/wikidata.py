@@ -17,7 +17,7 @@ import time
 from .paths import wiki_dir
 from .services import parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_stock
 
-INDEX_VERSION = 3  # bump when the index layout or a parser changes, so old indexes are rebuilt
+INDEX_VERSION = 4  # bump when the index layout or a parser changes, so old indexes are rebuilt
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 N = r"\[(?P<n>[\d,]+)\]"
 
@@ -80,6 +80,7 @@ BODY_CLAUSES = [
     (r"Collect (?P<kw>.+?) from activities\.", lambda m: {"type": "gain_keyword", "keyword": m["kw"]}),
     (r"Catch (?P<kw>.+?) while (?P<skill>\w+)", lambda m: {"type": "gain_keyword", "keyword": m["kw"],
                                                            "skill": m["skill"].lower()}),
+    (r"Claim a rare Pet egg", lambda m: {"type": "rare_egg"}),
     (r"Hatch any Pet egg", lambda m: {"type": "hatch", "item": None}),
     (r"Hatch an? (?P<i>.+? egg)", lambda m: {"type": "hatch", "item": m["i"]}),
     (r"Complete a (?P<skill>\w+) recipe", lambda m: {"type": "craft_skill", "skill": m["skill"].lower()}),
