@@ -30,3 +30,18 @@ def test_achievement_goal_views(svc):
     deer = rows["Big Game Hunter"]["goals"][0]["ways"][0]
     assert deer.startswith("Deer hunting") and (svc._player.skill_levels.get("hunting", 1) >= 35) == ("(needs" not in deer)
     assert rows["Tutorial Complete"]["goals"][0]["progress"] == f"{svc._player.char_level}/80"
+
+
+def test_plan_achievements_shares_levelling(svc):
+    from dataclasses import replace
+    svc._player = replace(svc._player, skill_xp={**svc._player.skill_xp, "hunting": 0})
+    out = svc.plan_achievements(targets=[1], only=["It's A Trap!", "Big Game Hunter",
+                                                   "One Does Not Simply Walk Into Mordor", "Enter Sandman"])
+    rows = {r["name"]: r for r in out["order"]}
+    trap, hunter = rows["It's A Trap!"], rows["Big Game Hunter"]
+    # hunting is levelled once: whichever comes second only pays from where the first left off
+    first, second = sorted([trap, hunter], key=lambda r: r["total_steps_walked"])
+    assert first["levelling"]["hunting"].startswith("1 -> ")
+    assert not second.get("levelling") or not second["levelling"]["hunting"].startswith("1 -> ")
+    assert "Mordor" in " ".join(rows) and out["not_estimated"][0]["name"] == "Enter Sandman"
+    assert [r["total_steps_walked"] for r in out["order"]] == sorted(r["total_steps_walked"] for r in out["order"])

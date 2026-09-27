@@ -876,6 +876,27 @@ class Service:
             out["recorded_but_not_on_wiki"] = unmatched
         return out
 
+    def plan_achievements(self, targets: list[int] | None = None, only: list[str] | None = None,
+                          pet: str | None = "auto") -> dict:
+        from .achplan import AchievementPlanner
+
+        known = self.achievement_list()
+        if not known:
+            raise RuntimeError("Couldn't read the wiki's Achievements page.")
+        if only:
+            known = {k: known[k] for k in (self._resolve_achievement(n, known) for n in only)}
+        p = self.player()
+        recorded = self._info()["achievements"]
+        unlocked = p.achievement_points
+        outer = self._supply_cache is None
+        if outer:
+            self._supply_cache, self._supplying = {}, set()
+        try:
+            return AchievementPlanner(self, pet).plan(known, recorded, unlocked, targets or [])
+        finally:
+            if outer:
+                self._supply_cache = None
+
     # ---------- lookups ----------
 
     def search(self, query: str, kind: str | None = None) -> list[dict]:
@@ -1992,7 +2013,9 @@ class Service:
         src = self._near(near)
         near_name = gd.locations[src]["name"] if src else None
         rows, cannot = [], []
-        self._supply_cache, self._supplying = {}, set()
+        outer = self._supply_cache is None
+        if outer:
+            self._supply_cache, self._supplying = {}, set()
         try:
             for i in items:
                 have = p.item_counts.get(i, (0, 0))[0] if p else 0
@@ -2004,7 +2027,8 @@ class Service:
                 rows.append((how["steps"], {"item": gd.name(i), "have": have, "short": short,
                                             "how": how["how"], "steps": how["steps"]}))
         finally:
-            self._supply_cache = None
+            if outer:
+                self._supply_cache = None
         rows.sort(key=lambda t: t[0])
         return {"keyword": keyword, "quantity": quantity, "ranking": [r for _, r in rows[:top]],
                 "cannot_get_yet": sorted(cannot),

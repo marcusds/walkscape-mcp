@@ -36,7 +36,8 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | --- | --- |
 | `load_player_save` / `player_summary` | Load and inspect your character export |
 | `remember_player_info` | Store what the export lacks: action-history unlocks, achievements, goals, explored regions, current location, and gear/levels/items gained since the export |
-| `achievements` | Every achievement with points, requirements and your recorded status |
+| `achievements` | Every achievement with points, requirements and your recorded status; requirements split into goals with what advances each and your progress |
+| `plan_achievements` | Remaining achievements ordered by points per step, with the levelling each needs (shared once reached) and when point targets are reached |
 | `optimize_loadout` | Best loadout for an activity/recipe and objective, using owned gear; shows the diff from your current gear, unowned upgrades, an export string and a planner link. Recipes also pick the best crafting service location |
 | `evaluate_loadout` | Stats, steps and drop rates for your current gear or a gear-set string |
 | `rank_activities` | Where to farm an item (or its fine version, or several items at once) in the fewest steps, optionally counting travel from where you are |
