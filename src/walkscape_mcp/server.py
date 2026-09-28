@@ -397,6 +397,15 @@ def wiki_page(title: str, max_chars: int = 12000) -> str:
 
 
 @mcp.tool()
+def whats_new(since: int | None = None) -> dict:
+    """What's new in WalkScape: the latest game version and its change log from the wiki (new activities, items,
+    pets, locations, fixes), whether the server's game data has caught up, what changed in the game data at its
+    last refresh, and wiki pages created since the daily dump. since: a build number (e.g. 695) to get every
+    change log after it instead of just the latest."""
+    return s().whats_new(since)
+
+
+@mcp.tool()
 def data_status(refresh: bool = False) -> dict:
     """Show game data/wiki freshness. refresh=True re-downloads game data in the background."""
     st = s().data_status()

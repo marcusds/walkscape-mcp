@@ -114,10 +114,24 @@ async def fetch_snapshot(game_version: str | None = None) -> dict:
 
 
 def save_snapshot(data: dict, path: Path | None = None) -> Path:
+    """Write the snapshot; when it replaces the default one, what changed goes into the whats_new history."""
+    default = path is None
     path = path or snapshot_dir() / "gamedata.json"
+    old = None
+    if default and path.exists():
+        try:
+            old = json.loads(path.read_text())
+        except ValueError:
+            pass
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, separators=(",", ":")))
     tmp.replace(path)
+    if default:
+        try:
+            from .changes import record
+            record(old, data)
+        except Exception:
+            logging.getLogger(__name__).exception("recording game data changes failed")
     return path
 
 

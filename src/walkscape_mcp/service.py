@@ -192,6 +192,74 @@ class Service:
             sync.save_snapshot(self._gd.snap)
             self._snap_mtime = (snapshot_dir() / "gamedata.json").stat().st_mtime
 
+    def whats_new(self, since: int | None = None) -> dict:
+        """The game's latest version and change log (the wiki's Versions pages), what changed in the game data at
+        the last refreshes, and wiki pages created since the dump that the game data may not have yet."""
+        from . import changes
+
+        out: dict = {}
+        data_version = self.gd.meta.get("game_version")
+        data_build = int(m[1]) if data_version and (m := re.search(r"\+(\d+)", data_version)) else None
+        try:
+            self.wiki.update()
+            versions = self.wiki.page("Versions", 200_000)
+        except Exception as e:
+            versions, out["wiki_error"] = "", str(e)
+        current = re.search(r"current version of the game is (\S+)", versions)
+        builds = sorted({int(b) for b in re.findall(r"\+(\d+) Change Log", versions)})
+        out["game_version"] = {"latest": current[1] if current else None,
+                               "server_data_labelled": data_version,
+                               "label_note": "the data's label is the game version of the save loaded when it was "
+                                             "fetched, so it can lag; server_has_new_content checks the content"}
+        wanted = [b for b in builds if b > since] if since else builds[-1:]
+        logs = {}
+        for b in wanted[-5:]:
+            try:
+                text = self.wiki.page(f"Versions/{b}", 30_000)
+                logs[f"+{b}"] = text.split("\n", 3)[-1].strip()  # drop the title and source lines
+            except KeyError:
+                logs[f"+{b}"] = "change log not on the wiki yet"
+        out["change_logs"] = logs
+        # does the game data have what the latest change log lists as new?
+        known = {norm(x.get("name") or k) for coll in (self.gd.items, self.gd.activities, self.gd.recipes,
+                                                       self.gd.locations, self.gd.pets)
+                 for k, x in coll.items() if isinstance(x, dict)}
+        known |= {norm(b["name"]) for b in self.building_table().values()}
+        if logs:
+            lines = [ln.strip() for ln in list(logs.values())[-1].splitlines()]
+            listed, missing = 0, []
+            for i, ln in enumerate(lines):
+                if m := re.match(r"\((Activities|Items|Locations|Pets|Buildings)\) (\d+) new", ln):
+                    for name in lines[i + 1:i + 1 + int(m[2])]:
+                        listed += 1
+                        if norm(name) not in known:
+                            missing.append(name)
+            if listed:
+                out["server_has_new_content"] = (f"yes: all {listed} new activities, items, locations, pets and "
+                                                 "buildings in the latest change log are in the game data"
+                                                 if not missing else
+                                                 f"not yet: missing {', '.join(missing)} (the planner API may not "
+                                                 "have the update; tools don't know about these)")
+        hist = changes.history()
+        if hist:
+            last = hist[-1]
+            out["last_data_change"] = {**{k: last[k] for k in ("from", "to", "added", "removed")},
+                                       "changed_counts": {k: len(v) for k, v in last["changed"].items()},
+                                       "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(last["at"]))}
+        try:
+            fresh = [t for t in self.wiki.new_pages() if not t.startswith("Versions")]
+        except Exception:
+            fresh = []
+        # a new page about something the game data already has (e.g. "Bake bread (Recipe)") isn't new content
+        known = {norm(x.get("name") or k) for coll in (self.gd.items, self.gd.activities, self.gd.recipes,
+                                                       self.gd.locations, self.gd.pets)
+                 for k, x in coll.items() if isinstance(x, dict)}
+        known |= {norm(b["name"]) for b in self.building_table().values()}
+        fresh = [t for t in fresh if norm(re.sub(r"\s*\([^)]*\)$", "", t)) not in known]
+        if fresh:
+            out["new_on_wiki_not_in_data"] = fresh
+        return out
+
     def data_status(self) -> dict:
         gd = self._gd
         return {

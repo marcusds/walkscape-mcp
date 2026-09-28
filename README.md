@@ -53,6 +53,7 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `get_item` / `get_activity` / `get_location` / `search_game_data` | Lookups; `get_item`/`get_activity` take `names` for several at once, and `get_item` on a keyword lists its items |
 | `decode_gear_set` | Read a gear.walkscape.app export string |
 | `wiki_search` / `wiki_page` | Wiki (daily dump plus live edits since) |
+| `whats_new` | The latest game version and its change log from the wiki, whether the server's data has the new content, what changed at the last data refresh, and new wiki pages not in the data |
 | `data_status` | Data freshness; `refresh=true` forces an update |
 
 Objectives: `item`, `fine_item`, `xp`, `total_xp`, `reward_rolls`, `actions`, `fine`, `chests`, `gems`, `collectibles`, `items` (several items with quantities).

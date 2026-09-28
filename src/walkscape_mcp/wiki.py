@@ -153,6 +153,17 @@ class Wiki:
         lv = self.live()
         return (lv.get("pages") or {}) if lv.get("tag") == self.state().get("tag") else {}
 
+    def new_pages(self) -> list[str]:
+        """Pages created on the wiki since the dump was scraped (edited pages that the dump doesn't have)."""
+        a = self.archive()
+        out = []
+        for t in self.live_pages():
+            try:
+                a.get_entry_by_path(t.replace(" ", "_"))
+            except KeyError:
+                out.append(t)
+        return sorted(out)
+
     def _live_title(self, title: str) -> str | None:
         want = title.strip().replace("_", " ").lower()
         return next((t for t in self.live_pages() if t.lower() == want), None)
