@@ -200,6 +200,7 @@ class Service:
             "refresh_running": bool(self._refresh_thread and self._refresh_thread.is_alive()),
             "last_refresh_error": self._refresh_error,
             "wiki_dump": self.wiki.state().get("tag"),
+            "wiki_live_pages": len(self.wiki.live_pages()),  # edited since the dump; read from the live wiki
             "player_loaded": self._player.name if self._player else None,
         }
 
@@ -380,9 +381,9 @@ class Service:
         return sum(a["points"] for a in self.achievement_list().values()) or None
 
     def _wiki_index(self) -> dict:
-        """Wiki facts parsed once per dump (wikidata.py): services, buildings, achievements. Empty sections if the
-        wiki is unavailable."""
-        tag = self.wiki.state().get("tag")
+        """Wiki facts parsed once per dump and live edit (wikidata.py): services, buildings, achievements. Empty
+        sections if the wiki is unavailable."""
+        tag = self.wiki.version()
         idx = getattr(self, "_windex", None)
         if idx is None or idx.get("tag") != tag:
             try:
@@ -2006,7 +2007,7 @@ class Service:
         blob = json.dumps([dataclasses.asdict(self._player) if self._player else None,
                            info.get("history"), info.get("explored"), info.get("location"),
                            sorted(self._not_met.items()),
-                           self.gd.meta, self.wiki.state().get("tag") if getattr(self, "wiki", None) else None,
+                           self.gd.meta, self.wiki.version() if getattr(self, "wiki", None) else None,
                            LOADOUT_CACHE_VERSION],
                           sort_keys=True, default=canon)
         h = hashlib.sha1(blob.encode()).hexdigest()

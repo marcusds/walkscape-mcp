@@ -187,9 +187,11 @@ def build_number(version: str | None) -> int | None:
 def latest_wiki_build() -> int | None:
     from .wiki import Wiki
 
-    a = Wiki().archive()
+    w = Wiki()
+    a = w.archive()
     builds = [int(m.group(1)) for i in range(a.all_entry_count)
               if (m := re.fullmatch(r"Versions/(\d+)", a._get_entry_by_id(i).path))]
+    builds += [int(m.group(1)) for t in w.live_pages() if (m := re.fullmatch(r"Versions/(\d+)", t))]
     return max(builds) if builds else None
 
 

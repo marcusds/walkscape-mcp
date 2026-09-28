@@ -7,7 +7,7 @@ from .service import Service
 
 INSTRUCTIONS = f"""\
 WalkScape gear/loadout optimizer backed by the official gear planner data (gear.walkscape.app)
-and an offline copy of the WalkScape wiki.
+and the WalkScape wiki (daily dump plus pages edited since).
 
 Workflow:
 1. If no character is loaded, ask the user to paste their exported character JSON and call load_player_save.
@@ -383,14 +383,15 @@ def inventory_fill(activity: str, free_slots: int, location: str | None = None,
 
 @mcp.tool()
 def wiki_search(query: str) -> list[str]:
-    """Full-text search the WalkScape wiki (offline daily dump). Returns page titles."""
+    """Search the WalkScape wiki (daily dump; pages edited since match by title). Returns page titles."""
     s().wiki.update()
     return s().wiki.search(query)
 
 
 @mcp.tool()
 def wiki_page(title: str, max_chars: int = 12000) -> str:
-    """Read a WalkScape wiki page as text (offline daily dump). Good for mechanics, quests, lore, shops."""
+    """Read a WalkScape wiki page as text (daily dump, or the live page if edited since). Good for mechanics, quests,
+    lore, shops."""
     s().wiki.update()
     return s().wiki.page(title, max_chars)
 

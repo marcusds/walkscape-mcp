@@ -151,7 +151,7 @@ def build(wiki) -> dict:
         b["requirements"] = parse_building_requirements(page)
         currency = "adventurers_guild_token" if "Outpost" in b["types"] else "coins"
         b["sells"] = [{**x, "currency": currency} for x in parse_shop_stock(page)]
-    return {"version": INDEX_VERSION, "tag": wiki.state().get("tag"), "built_at": time.time(),
+    return {"version": INDEX_VERSION, "tag": wiki.version(), "built_at": time.time(),
             "services": services, "buildings": buildings,
             "achievements": parse_achievements_page(wiki.page("Achievements", 1_000_000))}
 
@@ -163,13 +163,13 @@ def save(index: dict) -> None:
 
 
 def load(wiki, update: bool = True) -> dict:
-    """The index for the current wiki dump, rebuilding it if the dump (or the index layout) changed."""
+    """The index for the current wiki dump and live edits, rebuilding it if either (or the index layout) changed."""
     if update:
         try:
             wiki.update()
         except Exception:
             pass  # offline: keep using the dump we have
-    tag = wiki.state().get("tag")
+    tag = wiki.version()
     try:
         index = json.loads(index_file().read_text())
         if index.get("tag") == tag and index.get("version") == INDEX_VERSION:

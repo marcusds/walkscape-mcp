@@ -54,7 +54,7 @@ This also downloads the newest wiki dump.
 uv run --directory /mnt/storage1/workspace/walkscape-mcp walkscape-wiki-index
 ```
 
-Services, buildings and achievements are parsed from the wiki once per dump into `~/.local/share/walkscape-mcp/wiki/index.json` (`wikidata.py`); the server only reads that file. The server rebuilds it by itself when the dump changes, but run it here to see the coverage line ("N/M goals parsed"). If the count of parsed achievement goals dropped, or a new achievement shows up as `other`, the wiki's wording changed: add or fix a pattern in `wikidata.BODY_CLAUSES`/`WHOLE_CLAUSES`, bump `INDEX_VERSION`, and add a test.
+Services, buildings and achievements are parsed from the wiki (dump plus pages edited since, fetched live) into `~/.local/share/walkscape-mcp/wiki/index.json` (`wikidata.py`); the server only reads that file. The server rebuilds it by itself when the dump or a live edit changes, but run it here to see the coverage line ("N/M goals parsed"). If the count of parsed achievement goals dropped, or a new achievement shows up as `other`, the wiki's wording changed: add or fix a pattern in `wikidata.BODY_CLAUSES`/`WHOLE_CLAUSES`, bump `INDEX_VERSION`, and add a test.
 
 ### 3. After the refresh finishes, check the data-side drift
 

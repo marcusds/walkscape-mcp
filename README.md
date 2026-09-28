@@ -7,7 +7,7 @@ An MCP server for optimizing WalkScape loadouts by talking to Claude, e.g.
 ## Data sources
 
 - **Game data** – the official gear planner API (`gear.walkscape.app`): exact item stats per quality, attribute conditions, activities, loot table weights, pets, recipes. Snapshotted to `~/.local/share/walkscape-mcp/snapshot/` and refreshed in the background when a loaded save reports a different game version, or after 7 days as a fallback. A full refresh takes about 6 minutes: the API is slow, and requests are capped at 4 in flight to keep load off it. The running server keeps using the old snapshot and switches to the new one when the refresh finishes.
-- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h, so wiki.walkscape.app itself gets no traffic. Used for mechanics, lore, shops and anything the structured data doesn't cover. The crafting service bonuses, buildings (type, what you can do there, entry requirements, shop stock and prices) and achievements (requirements split into goals) are parsed once per dump into `wiki/index.json` next to it; `walkscape-wiki-index` rebuilds it, and the server does so by itself when the dump changes.
+- **Wiki** – the daily ZIM dump from [Walkscape-Wiki-Scrapper](https://github.com/samuellmdev/Walkscape-Wiki-Scrapper), downloaded at most every 6h. Pages edited since the dump was scraped (new locations after a game update, say) are listed with one `recentchanges` query per check, continued from the last one, and fetched from wiki.walkscape.app only when read, then cached until edited again; `data_status` shows how many there are. Used for mechanics, lore, shops and anything the structured data doesn't cover. The crafting service bonuses, buildings (type, what you can do there, entry requirements, shop stock and prices) and achievements (requirements split into goals) are parsed into `wiki/index.json` next to it; `walkscape-wiki-index` rebuilds it, and the server does so by itself when the dump or a live edit changes.
 
 ## Setup
 
@@ -52,7 +52,7 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `cheapest_with_keyword` | Fewest steps to a stack of N of any item with a keyword (e.g. 1,000 of any food), farming or crafting |
 | `get_item` / `get_activity` / `get_location` / `search_game_data` | Lookups; `get_item`/`get_activity` take `names` for several at once, and `get_item` on a keyword lists its items |
 | `decode_gear_set` | Read a gear.walkscape.app export string |
-| `wiki_search` / `wiki_page` | Offline wiki |
+| `wiki_search` / `wiki_page` | Wiki (daily dump plus live edits since) |
 | `data_status` | Data freshness; `refresh=true` forces an update |
 
 Objectives: `item`, `fine_item`, `xp`, `total_xp`, `reward_rolls`, `actions`, `fine`, `chests`, `gems`, `collectibles`, `items` (several items with quantities).
@@ -85,7 +85,7 @@ Afterwards, any slot the objective left empty is filled with gear that adds side
 
 ### Cache
 
-Best loadouts, routes, rankings and recipe plans are cached in `~/.local/share/walkscape-mcp/loadout_cache.sqlite`, keyed by a fingerprint of everything they depend on: the character (levels, gear, items, reputation), remembered unlocks and location, the game data and wiki dump, and `LOADOUT_CACHE_VERSION` in `service.py`. A new save or remembered change gets new entries, so repeating `plan_achievements` for an unchanged character takes seconds instead of minutes. Bump `LOADOUT_CACHE_VERSION` when a change to the optimizer, engine or planners changes their results; delete the file to clear it; `WALKSCAPE_LOADOUT_CACHE=0` turns it off (the tests do).
+Best loadouts, routes, rankings and recipe plans are cached in `~/.local/share/walkscape-mcp/loadout_cache.sqlite`, keyed by a fingerprint of everything they depend on: the character (levels, gear, items, reputation), remembered unlocks and location, the game data and wiki (dump and live edits), and `LOADOUT_CACHE_VERSION` in `service.py`. A new save or remembered change gets new entries, so repeating `plan_achievements` for an unchanged character takes seconds instead of minutes. Bump `LOADOUT_CACHE_VERSION` when a change to the optimizer, engine or planners changes their results; delete the file to clear it; `WALKSCAPE_LOADOUT_CACHE=0` turns it off (the tests do).
 
 ## Keeping it up to date
 
