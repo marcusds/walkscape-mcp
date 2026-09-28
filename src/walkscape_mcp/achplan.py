@@ -36,6 +36,7 @@ class AchievementPlanner:
         self.s, self.gd, self.p, self.pet = svc, svc.gd, svc._player, pet
         self.rare_egg_chance = rare_egg_chance
         self._real_hops: dict = {}
+        self._raised: dict = {}
         self._seen_base = self._seen_real = 0.0
         self._metrics: dict = {}
         self._xp_rates: dict = {}
@@ -96,7 +97,8 @@ class AchievementPlanner:
                 base = self.dist(a, b)
                 try:
                     r = self.s.plan_route(self.gd.locations[b]["name"], start=self.gd.locations[a]["name"])
-                    real = float(r["single_loadout"]["steps"])
+                    single = r["single_loadout"]  # a message when no one loadout meets every leg's terrain
+                    real = float(single["steps"] if isinstance(single, dict) else r["steps_swapping_gear_each_leg"])
                 except Exception:
                     real = base * self.travel_factor()
                 self._real_hops[(a, b)] = real
@@ -131,9 +133,13 @@ class AchievementPlanner:
             yield
             return
         s, saved = self.s, (self.s._player, self.s._supply_cache, self.s._supplying)
-        xp = {**self.p.skill_xp, **{k: self._need(k, v) for k, v in raise_to.items() if not k.startswith("rep:")}}
-        rep = {**self.p.reputation, **{k[4:]: v for k, v in raise_to.items() if k.startswith("rep:")}}
-        s._player, s._supply_cache, s._supplying = replace(self.p, skill_xp=xp, reputation=rep), {}, set()
+        key = tuple(sorted(raise_to.items()))
+        if key not in self._raised:  # one character and supply cache per set of raised levels, reused
+            xp = {**self.p.skill_xp, **{k: self._need(k, v) for k, v in raise_to.items() if not k.startswith("rep:")}}
+            rep = {**self.p.reputation, **{k[4:]: v for k, v in raise_to.items() if k.startswith("rep:")}}
+            self._raised[key] = (replace(self.p, skill_xp=xp, reputation=rep), {})
+        player, cache = self._raised[key]
+        s._player, s._supply_cache, s._supplying = player, cache, set()
         try:
             yield
         finally:

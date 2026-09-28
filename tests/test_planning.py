@@ -188,3 +188,22 @@ def test_plan_recipe_names_what_blocks_a_material(svc):
     assert any(b.startswith("Squirrel hunting") and "hunting lvl 15" in b for b in gather["blocked_activities"])
     _at_hunting(svc, 10**8)  # at hunting 99 the same plan farms the meat instead
     assert "steps_for_shortfall" in svc.plan_recipe("Cook meat", 20)["materials"][0]["gather"]
+
+
+def test_loadout_cache(svc, tmp_path, monkeypatch):
+    from walkscape_mcp.optimizer import Objective
+    monkeypatch.setenv("WALKSCAPE_LOADOUT_CACHE", "1")
+    monkeypatch.setattr("walkscape_mcp.service.loadout_cache_file", lambda: tmp_path / "cache.sqlite")
+    ctx, lo, ev = svc._best_loadout("cut_birch_trees", Objective("actions"))
+    searched = []
+    monkeypatch.setattr(svc, "_search_best_loadout", lambda *a, **k: searched.append(a))
+    ctx2, lo2, ev2 = svc._best_loadout("cut_birch_trees", Objective("actions"))
+    assert not searched and lo2.slots == lo.slots and ev2.metrics == ev.metrics
+    # a changed character misses the cache
+    from dataclasses import replace
+    svc._player = replace(svc._player, skill_xp={**svc._player.skill_xp, "woodcutting": 10**7})
+    try:
+        svc._best_loadout("cut_birch_trees", Objective("actions"))
+    except TypeError:
+        pass  # the stub returns None; reaching it proves the lookup missed
+    assert searched

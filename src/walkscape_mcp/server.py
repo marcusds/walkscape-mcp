@@ -159,7 +159,8 @@ def plan_achievements(targets: list[int] | None = None, only: list[str] | None =
     only: plan just these achievements. rare_egg_chance: the chance a found egg is rare (e.g. 0.01), which the
     game data doesn't give; without it Rare Find isn't estimated. Coins count selling what grinds drop; eggs hatch
     one at a time after their pet XP, so their points come later; shops are used only for what one visit stocks.
-    Achievements it can't estimate are listed with why. Slow: several minutes for all of them."""
+    Achievements it can't estimate are listed with why. Slow the first time for a character (about 5 minutes for
+    all of them); results are cached, so repeating it for an unchanged character takes seconds."""
     return s().plan_achievements(targets, only, pet, rare_egg_chance)
 
 

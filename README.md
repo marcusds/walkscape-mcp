@@ -83,6 +83,10 @@ Afterwards, any slot the objective left empty is filled with gear that adds side
 
 - Whether double actions or "no materials consumed" save inputs: every action is assumed to use one.
 
+### Cache
+
+Best loadouts, routes, rankings and recipe plans are cached in `~/.local/share/walkscape-mcp/loadout_cache.sqlite`, keyed by a fingerprint of everything they depend on: the character (levels, gear, items, reputation), remembered unlocks and location, the game data and wiki dump, and `LOADOUT_CACHE_VERSION` in `service.py`. A new save or remembered change gets new entries, so repeating `plan_achievements` for an unchanged character takes seconds instead of minutes. Bump `LOADOUT_CACHE_VERSION` when a change to the optimizer, engine or planners changes their results; delete the file to clear it; `WALKSCAPE_LOADOUT_CACHE=0` turns it off (the tests do).
+
 ## Keeping it up to date
 
 Game data refreshes on its own. Some logic was ported by hand from the planner's JavaScript and the wiki's mechanics pages, and a data refresh never checks those sources. `walkscape-drift` compares them against reference copies in `reference/`, together with the requirement, stat and loot-table types the engine handles and the save format:

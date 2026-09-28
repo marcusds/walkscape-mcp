@@ -37,3 +37,8 @@ def save_history_dir() -> Path:
     p = home() / "save_history"
     p.mkdir(exist_ok=True)
     return p
+
+
+def loadout_cache_file() -> Path:
+    """Best loadouts already found, keyed by the character and inputs they depend on (see service._best_loadout)."""
+    return home() / "loadout_cache.sqlite"

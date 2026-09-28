@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from walkscape_mcp.player import parse_save
 from walkscape_mcp.sync import load_snapshot
 
 FIXTURES = Path(__file__).parent / "fixtures"
+os.environ.setdefault("WALKSCAPE_LOADOUT_CACHE", "0")  # tests search every loadout; test_loadout_cache turns it on
 
 
 @pytest.fixture(scope="session")

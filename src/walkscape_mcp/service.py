@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import fcntl
+import functools
+import hashlib
 import heapq
 import itertools
 import json
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -46,7 +50,7 @@ from .optimizer import (
     prepare,
     quick_score,
 )
-from .paths import player_file, player_info_file, save_history_dir, snapshot_dir
+from .paths import loadout_cache_file, player_file, player_info_file, save_history_dir, snapshot_dir
 from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .quality import at_least, quality_odds
 from .wiki import Wiki
@@ -59,6 +63,32 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
 # services whose id and icon don't name their kind (the wiki: smithing and trinketry bonuses)
+LOADOUT_CACHE_VERSION = 2  # bump when the optimizer, engine or a memoized planner changes its results
+
+
+def disk_memo(fn):
+    """Keep a method's JSON result on disk per character fingerprint (see Service._fingerprint), for the slow
+    planners the achievement plan calls again and again. Results that aren't plain JSON aren't kept."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        db = self._loadout_cache()
+        if db is None:
+            return fn(self, *args, **kwargs)
+        # items being supplied up the call stack cut recursion short, so they're part of the result's key
+        busy = sorted(getattr(self, "_supplying", None) or [])
+        key = json.dumps([fn.__name__, self._fingerprint(), args, sorted(kwargs.items()), busy], default=str)
+        row = db.execute("SELECT value FROM memo WHERE key = ?", (key,)).fetchone()
+        if row:
+            return json.loads(row[0])
+        out = fn(self, *args, **kwargs)
+        try:
+            value = json.dumps(out)
+        except (TypeError, ValueError):
+            return out
+        with db:
+            db.execute("INSERT OR REPLACE INTO memo VALUES (?, ?)", (key, value))
+        return out
+    return wrapper
 SERVICE_KIND_OVERRIDES = {"heatstroke_metalworks": "forge", "granular_faceting_facility": "trinketry_bench"}
 STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
 NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
@@ -1629,6 +1659,7 @@ class Service:
             "note": "base_steps is route distance before travel gear; call plan_route for the trip with optimized gear.",
         }
 
+    @disk_memo
     def plan_route(self, destination: str, start: str | None = None, via: list[str] | None = None,
                    avoid: list[str] | None = None, pet: str | None = "auto", owned_only: bool = True,
                    carried_only: bool = False) -> dict:
@@ -1642,8 +1673,14 @@ class Service:
         pool = self._pool(owned_only, carried_only)
         pets = self._pet_options(pet)
         obj = Objective("actions")  # a double action while travelling covers two of the route's 10 actions
-        gear_cache: dict[tuple, tuple] = {}  # (origin, terrain modifiers) -> (loadout, searcher)
-        legs_cache: dict[tuple[str, str], tuple | None] = {}
+        # The best gear per (start, terrain) and each leg's steps depend only on the character and the gear pool,
+        # so they're kept across calls until the character changes.
+        rc = getattr(self, "_route_cache", None)
+        if rc is None or rc["player"] is not self._player:
+            rc = self._route_cache = {"player": self._player, "gear": {}, "legs": {}}
+        pool_key = (owned_only, carried_only, pet)
+        gear_cache: dict[tuple, tuple] = rc["gear"].setdefault(pool_key, {})  # (origin, terrain) -> (loadout, searcher)
+        legs_cache: dict[tuple[str, str], tuple | None] = rc["legs"].setdefault(pool_key, {})
         blocked: dict[str, list[str]] = {}
 
         def leg(origin: str, route: dict):
@@ -1662,9 +1699,10 @@ class Service:
                 ev = evaluate(ctx, gear_cache[gkey][0], detail=False) if gkey in gear_cache else None
                 if ev is None or not ev.valid:
                     legs_cache[key] = None
-                    blocked[route["name"]] = [self._modifier_label(m) for m in self._leg_modifiers(route, origin)]
                 else:
                     legs_cache[key] = (leg_steps(ev), ctx, gear_cache[gkey][0])
+            if legs_cache[key] is None:
+                blocked[route["name"]] = [self._modifier_label(m) for m in self._leg_modifiers(route, origin)]
             return legs_cache[key]
 
         def leg_steps(ev) -> float:
@@ -1789,6 +1827,7 @@ class Service:
             "note": "Uses Perfect quality for crafted items and only items your levels allow you to equip.",
         }
 
+    @disk_memo
     def rank_activities(self, target: str | None = None, top: int = 10, pet: str | None = "current",
                         consumable: str | None = "none", owned_only: bool = True,
                         targets: dict[str, int] | None = None, near: str | None = None,
@@ -1910,9 +1949,64 @@ class Service:
 
     # ---------- planning ----------
 
+    def _fingerprint(self) -> str:
+        """Hash of everything a best loadout depends on besides the activity and objective: the character
+        (levels, gear, pets, reputation, items...), remembered unlocks, the game data and wiki dump, and the
+        optimizer's version. Cached per character object."""
+        fp = getattr(self, "_fp", None)
+        if fp and fp[0] is self._player:
+            return fp[1]
+        info = self._info() if self._player else {}
+
+        def canon(x):  # sets serialize in hash order, which changes between processes
+            return sorted(map(str, x)) if isinstance(x, (set, frozenset)) else str(x)
+        blob = json.dumps([dataclasses.asdict(self._player) if self._player else None,
+                           info.get("history"), info.get("explored"), info.get("location"),
+                           sorted(self._not_met.items()),
+                           self.gd.meta, self.wiki.state().get("tag") if getattr(self, "wiki", None) else None,
+                           LOADOUT_CACHE_VERSION],
+                          sort_keys=True, default=canon)
+        h = hashlib.sha1(blob.encode()).hexdigest()
+        self._fp = (self._player, h)
+        return h
+
+    def _loadout_cache(self):
+        if os.environ.get("WALKSCAPE_LOADOUT_CACHE") == "0":
+            return None
+        db = getattr(self, "_lc_db", None)
+        if db is None:
+            db = sqlite3.connect(loadout_cache_file(), timeout=10, check_same_thread=False)
+            db.execute("CREATE TABLE IF NOT EXISTS best (key TEXT PRIMARY KEY, value TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS memo (key TEXT PRIMARY KEY, value TEXT)")
+            self._lc_db = db
+        return db
+
     def _best_loadout(self, aid: str, obj: Objective, location: str | None = None, pet: str | None = "auto",
                       carried_only: bool = False):
-        """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location."""
+        """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location. Results are
+        kept on disk per character fingerprint, so repeating a plan for an unchanged character only re-evaluates."""
+        db = self._loadout_cache()
+        key = json.dumps([self._fingerprint(), aid, obj.kind, obj.target, sorted((obj.targets or {}).items()),
+                          obj.recipe_level, obj.level_bonus, obj.fine, location, pet, carried_only])
+        if db is not None:
+            row = db.execute("SELECT value FROM best WHERE key = ?", (key,)).fetchone()
+            if row:
+                v = json.loads(row[0])
+                lo = Loadout({k: OwnedItem(*x) if x else None for k, x in v["slots"].items()},
+                             tuple(v["pet"]) if v["pet"] else None,
+                             tuple(v["consumable"]) if v["consumable"] else None)
+                ctx = self._context(aid, v["loc"], carried_only)
+                return ctx, lo, evaluate(ctx, lo)
+        ctx, lo, ev = self._search_best_loadout(aid, obj, location, pet, carried_only)
+        if db is not None:
+            v = {"loc": ctx.location_id, "slots": {k: [o.id, o.quality] if o else None for k, o in lo.slots.items()},
+                 "pet": list(lo.pet) if lo.pet else None, "consumable": list(lo.consumable) if lo.consumable else None}
+            with db:
+                db.execute("INSERT OR REPLACE INTO best VALUES (?, ?)", (key, json.dumps(v)))
+        return ctx, lo, ev
+
+    def _search_best_loadout(self, aid: str, obj: Objective, location: str | None, pet: str | None,
+                             carried_only: bool):
         pool = self._pool(True, carried_only)
         pets = self._pet_options(pet)
         best = None
@@ -2020,6 +2114,7 @@ class Service:
                 "ranking": [r for _, r in rows[:top]], "not_doable": skipped,
                 "note": "Each row uses its own best owned loadout; optimize_loadout on a row gives the full gear."}
 
+    @disk_memo
     def cheapest_with_keyword(self, keyword: str, quantity: int, near: str | None = None, pet: str | None = "auto",
                               top: int = 5) -> dict:
         """For goals like "a stack of 1,000 of any food": each item with the keyword, how many the character has,
@@ -2054,6 +2149,7 @@ class Service:
                 "note": "Stock counts only normal-quality items (fine ones stack separately). Steps leave out travel; "
                         "plan_recipe or rank_activities on the winner give the trip and loadout."}
 
+    @disk_memo
     def plan_recipe(self, recipe: str, count: int, near: str | None = None, pet: str | None = "auto") -> dict:
         outer = self._supply_cache is None  # _supply_steps may plan sub-recipes; share one cache per top-level call
         if outer:
