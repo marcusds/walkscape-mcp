@@ -73,3 +73,20 @@ def test_plan_hatches_eggs_later_and_takes_a_rare_chance(svc):
     rare = next(r for r in out["order"] if r["name"] == "Rare Find")
     assert rare["how"][0].startswith("about 20 eggs")
     assert svc.plan_achievements(only=["Rare Find"])["not_estimated"][0]["name"] == "Rare Find"
+
+
+def test_owned_gear_counts_toward_gear_requirements(svc):
+    # Predator fishing needs 3 expert diving gear and a fishing spear; with no spear owned the search leaves the
+    # diving gear off too, which mustn't read as "diving gear can't be got"
+    from walkscape_mcp.achplan import AchievementPlanner
+    from walkscape_mcp.optimizer import Objective
+    gd = svc.gd
+    expert = [i for i, it in gd.items.items() if "expert_diving_gear" in (it.get("keywords") or [])
+              and not it.get("requirements")]
+    spears = [i for i, it in gd.items.items() if "fishing_spear" in (it.get("keywords") or [])]
+    from dataclasses import replace
+    svc._player = replace(svc._player, all_item_ids=(svc._player.all_item_ids | set(expert[:3])) - set(spears))
+    svc._supply_cache, svc._supplying = {}, set()
+    pl = AchievementPlanner(svc)
+    seg = pl._aseg("predator_fishing_spear", Objective("item", "raw_shark"), pl.prereqs("predator_fishing_spear")[0])
+    assert seg["gear"] is not None and "spear" in seg["gear"]["how"].lower()

@@ -63,7 +63,7 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
 # services whose id and icon don't name their kind (the wiki: smithing and trinketry bonuses)
-LOADOUT_CACHE_VERSION = 2  # bump when the optimizer, engine or a memoized planner changes its results
+LOADOUT_CACHE_VERSION = 3  # bump when the optimizer, engine or a memoized planner changes its results
 
 
 def disk_memo(fn):

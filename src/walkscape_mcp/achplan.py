@@ -182,13 +182,16 @@ class AchievementPlanner:
                 return None
             ids = [q["item"]] if kws is None else [i for i, it in gd.items.items()
                                                    if set(kws) & set(it.get("keywords") or [])]
-            owned = [i for i in ids if i in self.p.all_item_ids]
+            # owned pieces the character can wear count: the search leaves them off when another requirement
+            # (e.g. a missing spear) makes every loadout invalid anyway
+            owned = [i for i in ids if i in self.p.all_item_ids
+                     and check_all(gd.items[i].get("requirements") or [], ctx, None)]
             short = need - len(owned)
-            if short <= 0:  # owned but unusable (e.g. its own level requirement)
-                return None
+            if short <= 0:
+                continue
             costs = []
             for i in ids:
-                if i in owned or i in busy:
+                if i in self.p.all_item_ids or i in busy:
                     continue
                 self._gear_busy = busy | {i}
                 try:
