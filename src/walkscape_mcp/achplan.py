@@ -417,7 +417,15 @@ class AchievementPlanner:
             if "total_steps_leaves_out" in plan or not plan["total_steps"]:
                 continue
             crafts_per_step = plan["completions"] / plan["total_steps"]
-            rate = xps * ev.metrics["steps_per_action"] * crafts_per_step
+            xp_total = xps * ev.metrics["steps_per_action"] * plan["completions"]
+            for m in plan["materials"]:  # materials crafted along the way (shaping opals for opal rings) give XP too
+                sub = (m.get("gather") or {}).get("craft")
+                if sub:
+                    sid = next((r for r in gd.recipes if gd.recipes[r]["name"] == sub), None)
+                    if sid:
+                        out_n = next(iter((gd.recipes[sid].get("itemRewards") or {"?": 1}).values()))
+                        xp_total += (gd.activity_like(sid).get("xpRewardsMap") or {}).get(skill, 0) * m["short"] / out_n
+            rate = xp_total / plan["total_steps"]
             if rate > best["rate"]:
                 best = {"rate": rate, "how": f"{gd.activity_like(rid)['name']} (materials farmed)",
                         "seg": self._rseg(rid, crafts_per_step, plan)}

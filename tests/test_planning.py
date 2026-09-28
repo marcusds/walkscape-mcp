@@ -207,3 +207,24 @@ def test_loadout_cache(svc, tmp_path, monkeypatch):
     except TypeError:
         pass  # the stub returns None; reaching it proves the lookup missed
     assert searched
+
+
+def test_equal_locations_go_to_the_nearest(svc):
+    # Litter looting is the same at Kallaheim and Granfiddich; from Kallaheim, stay there
+    svc.remember_player_info(location="Kallaheim")
+    assert svc.optimize_loadout("Litter looting", "fine_item", "Trash", pet="none",
+                                show_missing_upgrades=False)["location"] == "Kallaheim"
+    # identical basic trinketry benches: the nearest one is used
+    out = svc.plan_recipe("Create a silver ring", 50, near="Kallaheim")
+    assert out["craft_at"].endswith("Salsfirth")
+
+
+def test_material_options_are_combined(svc):
+    # a silver bar takes 2 silver ore or 7 silver nuggets: 10 ore + 70 nuggets make 15 bars without gathering
+    from dataclasses import replace
+    counts = {**svc._player.item_counts, "silver_ore": (10, 0), "silver_nugget": (70, 0)}
+    svc._player = replace(svc._player, item_counts=counts)
+    out = svc.plan_recipe("Smelt a silver bar", 12)
+    mat = out["materials"][0]
+    assert mat["short"] == 0 and out["steps_gathering_shortfall"] == 0
+    assert mat.get("plus_owned"), mat

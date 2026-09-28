@@ -63,7 +63,7 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
 # services whose id and icon don't name their kind (the wiki: smithing and trinketry bonuses)
-LOADOUT_CACHE_VERSION = 3  # bump when the optimizer, engine or a memoized planner changes its results
+LOADOUT_CACHE_VERSION = 5  # bump when the optimizer, engine or a memoized planner changes its results
 
 
 def disk_memo(fn):
@@ -532,9 +532,12 @@ class Service:
 
     def _recipe_locations(self, rid: str) -> list[str]:
         """Locations with a service for the recipe that the character can use, one per distinct setting
-        (service, region, location keywords), since otherwise identical kitchens give identical results."""
+        (service, region, location keywords), since otherwise identical kitchens give identical results. The
+        nearest of each setting is kept, so the choice between settings can weigh the walk."""
         gd, seen, out = self.gd, set(), []
-        for lid, loc in gd.locations.items():
+        src = self._near(None) if self._player else None
+        dist = self._base_distances(src)[0] if src else {}
+        for lid, loc in sorted(gd.locations.items(), key=lambda kv: dist.get(kv[0], math.inf)):
             sv = self._recipe_service_at(rid, lid)
             if not sv:
                 continue
@@ -1469,7 +1472,7 @@ class Service:
             start, locked = self._start_and_locks(ctx, require_items or [], owned_only, pets, consumables)
             lo, searcher = optimize(ctx, obj, pool, pets, consumables, start=start, locked=locked, exclude=exclude)
             results.append((searcher.score(lo), loc, ctx, lo, searcher, start))
-        results.sort(key=lambda r: r[0])
+        results = self._location_order(results, None, None)
         score, loc, ctx, lo, searcher, start = results[0]
         bare = lo
         lo = searcher.complete(searcher.fill_empty(bare), self._worn())
@@ -1949,6 +1952,46 @@ class Service:
 
     # ---------- planning ----------
 
+    def _travel_factor(self) -> float:
+        """Steps per base step with the character's best travel gear, from one representative route (cached per
+        character)."""
+        p, src = self._player, self._near(None)
+        # it depends on where the character is, their agility and their gear, not on other skills, so characters
+        # with raised levels (the achievement planner) share it
+        key = (src, p.skill_xp.get("agility") if p else None, frozenset(p.owned_gear) if p else None)
+        cache = self.__dict__.setdefault("_tf_cache", {})
+        if key in cache:
+            return cache[key]
+        factor = 0.5
+        if src:
+            d = self._base_distances(src)[0]
+            dest = min((x for x in d if d[x] > 0), key=lambda x: abs(d[x] - 1500), default=None)
+            if dest:
+                try:
+                    r = self.plan_route(self.gd.locations[dest]["name"], start=self.gd.locations[src]["name"])
+                    single = r["single_loadout"]
+                    factor = (single["steps"] if isinstance(single, dict) else r["steps_swapping_gear_each_leg"]) \
+                        / r["base_steps"]
+                except Exception:
+                    pass
+        cache[key] = factor
+        return factor
+
+    def _location_order(self, results: list, near: str | None, actions: float | None) -> list:
+        """Sort (score, loc, ...) results: by the objective, with equal scores going to the nearest location; with
+        `actions`, by the steps for that many actions plus the walk there, so a small bonus far away loses."""
+        src = self._near(near)
+        dist = self._base_distances(src)[0] if src and len(results) > 1 else {}
+        factor = self._travel_factor() if actions and dist else 0.0
+
+        def key(r):
+            sc, loc = r[0], r[1]
+            walk = dist.get(loc, math.inf) if loc else 0.0
+            if actions and math.isfinite(sc[1]):
+                return (sc[0], sc[1] * actions + walk * factor)
+            return (sc[0], round(sc[1], 6), walk)
+        return sorted(results, key=key)
+
     def _fingerprint(self) -> str:
         """Hash of everything a best loadout depends on besides the activity and objective: the character
         (levels, gear, pets, reputation, items...), remembered unlocks, the game data and wiki dump, and the
@@ -1982,12 +2025,15 @@ class Service:
         return db
 
     def _best_loadout(self, aid: str, obj: Objective, location: str | None = None, pet: str | None = "auto",
-                      carried_only: bool = False):
-        """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location. Results are
-        kept on disk per character fingerprint, so repeating a plan for an unchanged character only re-evaluates."""
+                      carried_only: bool = False, near: str | None = None, actions: float | None = None):
+        """(ctx, loadout, evaluation) for the best owned loadout at the activity's best location: equal ones go
+        to the nearest, and with `actions` the walk there is weighed against the steps for that many actions.
+        Results are kept on disk per character fingerprint, so repeating a plan for an unchanged character only
+        re-evaluates."""
         db = self._loadout_cache()
         key = json.dumps([self._fingerprint(), aid, obj.kind, obj.target, sorted((obj.targets or {}).items()),
-                          obj.recipe_level, obj.level_bonus, obj.fine, location, pet, carried_only])
+                          obj.recipe_level, obj.level_bonus, obj.fine, location, pet, carried_only, near,
+                          round(actions) if actions else None])
         if db is not None:
             row = db.execute("SELECT value FROM best WHERE key = ?", (key,)).fetchone()
             if row:
@@ -1997,7 +2043,7 @@ class Service:
                              tuple(v["consumable"]) if v["consumable"] else None)
                 ctx = self._context(aid, v["loc"], carried_only)
                 return ctx, lo, evaluate(ctx, lo)
-        ctx, lo, ev = self._search_best_loadout(aid, obj, location, pet, carried_only)
+        ctx, lo, ev = self._search_best_loadout(aid, obj, location, pet, carried_only, near, actions)
         if db is not None:
             v = {"loc": ctx.location_id, "slots": {k: [o.id, o.quality] if o else None for k, o in lo.slots.items()},
                  "pet": list(lo.pet) if lo.pet else None, "consumable": list(lo.consumable) if lo.consumable else None}
@@ -2006,18 +2052,17 @@ class Service:
         return ctx, lo, ev
 
     def _search_best_loadout(self, aid: str, obj: Objective, location: str | None, pet: str | None,
-                             carried_only: bool):
+                             carried_only: bool, near: str | None = None, actions: float | None = None):
         pool = self._pool(True, carried_only)
         pets = self._pet_options(pet)
-        best = None
+        results = []
         for loc in self._locations_for(aid, location):
             ctx = self._context(aid, loc, carried_only)
             start, locked = self._start_and_locks(ctx, [], bool(self._player), pets, [None])
             lo, searcher = optimize(ctx, obj, pool, pets, [None], start=start, locked=locked)
-            sc = searcher.score(lo)
-            if best is None or sc < best[0]:
-                best = (sc, ctx, searcher.complete(searcher.fill_empty(lo), self._worn()))
-        _, ctx, lo = best
+            results.append((searcher.score(lo), loc, ctx, lo, searcher))
+        _, _, ctx, lo, searcher = self._location_order(results, near, actions)[0]
+        lo = searcher.complete(searcher.fill_empty(lo), self._worn())
         ctx.assumed_history.clear()  # report only what the chosen loadout depends on
         return ctx, lo, evaluate(ctx, lo)
 
@@ -2165,7 +2210,7 @@ class Service:
         _, rid = self._resolve_any(recipe, ["recipe"])
         r = gd.recipes[rid]
         out_item, out_n = next(iter((r.get("itemRewards") or {"?": 1}).items()))
-        ctx, lo, ev = self._best_loadout(rid, Objective("actions"))
+        ctx, lo, ev = self._best_loadout(rid, Objective("actions"), near=near, actions=count)
         m = ev.metrics
         per_completion = out_n * (1 + m["double_rewards"])
         completions = math.ceil(count / per_completion)
@@ -2182,6 +2227,28 @@ class Service:
                 rows.append({"item": gd.name(o["item"]), "id": o["item"], "need": need, "have": have,
                              "short": max(0, need - have)})
             pick = next((x for x in rows if not x["short"]), None)
+            combined = []
+            if pick is None and len(rows) > 1:
+                # no single option covers it: use up what's owned of each (e.g. silver ore, then nuggets), and
+                # only the crafts still uncovered need one option farmed or crafted
+                crafts = math.ceil(completions * (1 - m["no_materials_consumed"]))
+                amount = {x["id"]: o["amount"] for x, o in zip(rows, opts)}
+                left = crafts
+                for x in sorted(rows, key=lambda x: -(x["have"] // amount[x["id"]])):
+                    k = min(left, x["have"] // amount[x["id"]])
+                    if k:
+                        combined.append({"item": x["item"], "id": x["id"], "uses": k * amount[x["id"]],
+                                         "crafts": k})
+                        left -= k
+                if combined and left == 0:
+                    pick = {**next(x for x in rows if x["id"] == combined[0]["id"]),
+                            "need": combined[0]["uses"], "short": 0}
+                    combined = combined[1:]
+                elif combined:
+                    used = {c["id"]: c["uses"] for c in combined}
+                    rows = [{**x, "need": left * amount[x["id"]] + used.get(x["id"], 0),
+                             "short": max(0, left * amount[x["id"]] - (x["have"] - used.get(x["id"], 0)))}
+                            for x in rows]
             if pick is None:  # every option is short: take the cheapest one to farm or craft
                 supply = {x["item"]: self._supply_steps(x["id"], x["short"], near_name, pet) for x in rows}
                 pick = min(rows, key=lambda x: supply[x["item"]]["steps"] if supply[x["item"]] else math.inf)
@@ -2206,8 +2273,12 @@ class Service:
                     farm = round(best["steps_per_item"] * pick["short"])
                     pick["gather"] = {**best, "steps_for_shortfall": farm}
                     gather_total += farm
+            combined = [c for c in combined if c["id"] != pick.get("id")]
+            if combined:
+                pick["plus_owned"] = [{"item": c["item"], "uses": c["uses"], "for_crafts": c["crafts"]}
+                                      for c in combined]
             if len(rows) > 1:
-                pick["alternatives"] = [x["item"] for x in rows if x is not pick]
+                pick["alternatives"] = [x["item"] for x in rows if x["id"] != pick["id"]]
             del pick["id"]
             materials.append(pick)
         out = {
