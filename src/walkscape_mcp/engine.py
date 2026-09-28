@@ -46,8 +46,10 @@ HANDLED_STAT_TYPES = {
     "qualityOutcome", "bonusExperience", "rollSpecialTable", "stepsRequired", "findCollectibles", "findBirdNests",
     "findGems", "inventorySpace",
 }
-# countsAsKeyword is handled via abilities in equipped_state; travel distance only matters for Travelling
-IGNORED_STAT_TYPES = {"countsAsKeyword", "travelingDistance"}
+# countsAsKeyword is handled via abilities in equipped_state; travel distance only matters for Travelling.
+# swapItem (Termite's "Terminate": chance to turn found logs into Carpentry XP) isn't modelled by the planner, its XP
+# formula (swapToXpEffortModifier) is undocumented, and its swapFromKeywords "logs" matches no item keyword ("log").
+IGNORED_STAT_TYPES = {"countsAsKeyword", "travelingDistance", "swapItem"}
 
 SLOT_ORDER = ["head", "cape", "back", "chest", "primary", "secondary", "hands", "legs", "neck", "feet",
               "ring0", "ring1", "tool0", "tool1", "tool2", "tool3", "tool4", "tool5"]

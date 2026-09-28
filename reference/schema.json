@@ -42,6 +42,7 @@
   "qualityOutcome",
   "rollSpecialTable",
   "stepsRequired",
+  "swapItem",
   "workEfficiency"
  ],
  "table_group_types": [
