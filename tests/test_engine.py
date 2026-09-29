@@ -164,3 +164,9 @@ def test_get_item_lists_a_keywords_items(svc):
     assert out["keyword"] == "Light source" and "Simple torch" in out["items"]
     assert set(out["you_own"]) <= set(out["items"])
     assert svc.item_info("Simple torch")["name"] == "Simple torch"
+
+
+def test_get_item_shows_sell_value(svc):
+    ring = svc.item_info("Silver opal ring")["sell_value"]
+    assert ring["common (Normal)"] == "11 coins" and "ethereal (Eternal)" in ring
+    assert svc.item_info("Silver bar")["sell_value"] == {"normal": "7 coins", "fine": "38 coins"}

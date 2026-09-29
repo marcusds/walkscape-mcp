@@ -250,8 +250,9 @@ def _each(fn, name: str | None, names: list[str] | None):
 
 @mcp.tool()
 def get_item(name: str | None = None, names: list[str] | None = None) -> dict:
-    """Item details: slot, keywords, requirements, attributes at every quality, consumable effects,
-    which qualities the player owns, how many they have, and where the item comes from.
+    """Item details: slot, keywords, requirements, attributes at every quality, consumable effects, sell value
+    (per quality, or normal/fine), which qualities the player owns, how many they have, and where the item comes
+    from.
     A keyword name ("Light source", "Food") lists the items with that keyword and which the player owns.
     names: several items at once; returns name -> details."""
     return _each(s().item_info, name, names)

@@ -1058,6 +1058,12 @@ class Service:
                 "fine": [gd.describe_attr(a) for a in gd.consumable_attrs(item_id, True)],
                 "duration": item["buffs"][0].get("duration"),
             }
+        v = item.get("itemValue") or {}
+        if v.get("value") and v.get("currency") in ("money", "adventurers_guild_token"):
+            unit = "coins" if v["currency"] == "money" else "guild tokens"
+            out["sell_value"] = {("normal" if k == "common" and "fine" in v["value"] else
+                                  f"{k} ({QUALITY_NAMES[k]})" if k in QUALITY_NAMES and len(v["value"]) > 2 else k):
+                                 f"{n:,} {unit}" for k, n in v["value"].items() if n}
         if self._player:
             out["you_have"] = self._have(item_id)
         out["sources"] = self._sources(item_id, 40)
