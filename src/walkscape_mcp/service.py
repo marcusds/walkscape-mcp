@@ -260,6 +260,121 @@ class Service:
             out["new_on_wiki_not_in_data"] = fresh
         return out
 
+    def _keep_reasons(self) -> dict[str, str]:
+        """item id -> why to keep it: an unfinished achievement needs it (to own or collect) or needs it to craft
+        something, following recipes two levels down (shield <- bar <- ore/coal/scrap); or a saved goal names it
+        (or an ingredient of what it names)."""
+        gd, p, why = self.gd, self._player, {}
+        info = self._info()
+        done = {n for n, v in info["achievements"].items() if v.get("unlocked")}
+        items_with = lambda kid: [i for i, it in gd.items.items() if kid in (it.get("keywords") or [])]
+
+        def ingredients(targets, reason, depth=2):
+            """Every option of every material of the recipes that make these items, and theirs, depth levels."""
+            layer = list(targets)
+            for _ in range(depth):
+                nxt = []
+                for i in layer:
+                    for src in gd.item_sources.get(i, []):
+                        if src["kind"] != "recipe":
+                            continue
+                        for grp in gd.recipes[src["id"]].get("materials") or []:
+                            for o in grp["options"]:
+                                if o["item"] not in why:
+                                    why[o["item"]] = f"{reason} (via {gd.recipes[src['id']]['name']})"
+                                    nxt.append(o["item"])
+                layer = nxt
+
+        for name, a in self.achievement_list().items():
+            if name in done:
+                continue
+            for g in a.get("goals") or []:
+                t = g["type"]
+                try:
+                    if t in ("have_item", "equip_item", "craft_item"):
+                        targets = [gd.resolve(g["item"], "item")]
+                    elif t in ("hold_distinct", "equip_keyword", "craft_keyword", "craft_quality"):
+                        kid = self._keyword_id(g.get("keyword"))
+                        targets = items_with(kid) if kid else []
+                    elif t == "stack":  # the stack being built: the biggest one held
+                        kid = self._keyword_id(g.get("keyword"))
+                        held = [(p.item_counts.get(i, (0, 0))[0], i) for i in (items_with(kid) if kid else [])]
+                        targets = [max(held)[1]] if held and max(held)[0] else []
+                    else:
+                        continue
+                except KeyError:
+                    continue
+                if t in ("have_item", "equip_item", "hold_distinct", "equip_keyword", "stack"):
+                    for i in targets:
+                        why.setdefault(i, f"{name} needs it")
+                # what's still to be made (kinds not yet owned) needs its ingredients
+                todo = [i for i in targets if t not in ("hold_distinct", "equip_keyword") or i not in p.all_item_ids]
+                ingredients(todo, f"for {name}")
+        goals_text = " ".join(info.get("goals") or []).lower()
+        named = [i for i, it in gd.items.items() if len(it.get("name") or "") > 3
+                 and re.search(rf"\b{re.escape(it['name'].lower())}s?\b", goals_text)]
+        for i in named:
+            why.setdefault(i, "named in your goals")
+        ingredients(named, "for something in your goals", depth=1)
+        return why
+
+    def sell_candidates(self, top: int = 25) -> dict:
+        """Owned stacks ranked by sell value, marked sell or keep (with why), and the nearest shop that buys
+        anything."""
+        gd, p = self.gd, self.player()
+        keep = self._keep_reasons()
+        value = lambda i, q: ((gd.items.get(i) or {}).get("itemValue") or {})
+        rows = []
+        for iid, (n, fine) in p.item_counts.items():
+            it = gd.items.get(iid) or {}
+            v = value(iid, None)
+            if v.get("currency") != "money" or it.get("gearType"):
+                continue
+            vals = v.get("value") or {}
+            total = n * vals.get("common", 0) + fine * vals.get("fine", 0)
+            if total > 0:
+                rows.append({"item": gd.name(iid), "count": n, "fine": fine, "coins": total,
+                             **({"keep": keep[iid]} if iid in keep else {})})
+        # gear: keep the best owned quality (two of a ring), the rest can go
+        by_item: dict[str, list] = {}
+        for key, oi in p.owned_gear.items():
+            by_item.setdefault(oi.id, []).append((QUALITIES.index(oi.quality), oi.quality, p.gear_copies.get(key, 1)))
+        for iid, quals in by_item.items():
+            v = value(iid, None)
+            if v.get("currency") != "money":
+                continue
+            quals.sort(reverse=True)
+            keep_n = 2 if gd.items[iid].get("gearType") == "ring" else 1
+            spare, coins = [], 0
+            for _, q, count in quals:
+                k = min(keep_n, count)
+                keep_n -= k
+                if count - k:
+                    worth = (v.get("value") or {}).get(q, 0)
+                    spare.append(f"{count - k} {q}")
+                    coins += (count - k) * worth
+            if coins > 0:
+                rows.append({"item": gd.name(iid), "spare_copies": ", ".join(spare), "coins": coins,
+                             "kept": f"best quality ({quals[0][1]})",
+                             **({"keep": keep[iid]} if iid in keep else {})})
+        rows.sort(key=lambda r: -r["coins"])
+        sell = [r for r in rows if "keep" not in r]
+        out = {"coins_now": p.coins, "sell_total": sum(r["coins"] for r in sell),
+               "keep_total": sum(r["coins"] for r in rows if "keep" in r),
+               "sell": sell[:top], "keep": [r for r in rows if "keep" in r][:top]}
+        src = self._near(None)
+        if src:
+            dist = self._base_distances(src)[0]
+            shops = [(dist.get(b["location"], math.inf), b) for b in self.building_table().values()
+                     if b.get("buys") == "all"
+                     and (not b["requirements"] or check_all(b["requirements"], self._context("travelling", None), None))]
+            if shops:
+                d, b = min(shops, key=lambda t: t[0])
+                out["nearest_shop_buying_anything"] = f"{b['name']} @ {gd.locations[b['location']]['name']} ({d:,.0f} base steps)"
+        out["note"] = ("Values are the game's sell prices; fine stacks at the fine price. 'keep' marks what an "
+                       "unfinished achievement or a saved goal still needs, so check those before selling.")
+        return out
+
     def data_status(self) -> dict:
         gd = self._gd
         return {
@@ -524,7 +639,8 @@ class Service:
                                 "location": lid, "types": w["types"] if w else [],
                                 "actions": w["actions"] if w else {},
                                 "requirements": w.get("requirements", []) if w else [],
-                                "sells": w.get("sells", []) if w else [], "on_wiki": bool(w)}
+                                "sells": w.get("sells", []) if w else [], "buys": w.get("buys") if w else None,
+                                "on_wiki": bool(w)}
             self._buildings, self._buildings_for = out, idx
         return self._buildings
 

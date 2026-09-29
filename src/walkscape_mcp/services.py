@@ -161,3 +161,16 @@ def parse_shop_stock(page: str) -> list[dict]:
             continue
         out.append({"item": cells[0], "stock": stock, "price": price})
     return out
+
+
+def parse_shop_buys(page: str) -> str | None:
+    """What a building buys, from its page's Purchases line: "all" (all normal items), "some" or "none"."""
+    i = page.find("\nPurchases")
+    if i < 0:
+        return None
+    text = " ".join(page[i:i + 300].split())
+    if "All normal items may be sold" in text:
+        return "all"
+    if "Nothing may be sold" in text:
+        return "none"
+    return "some"

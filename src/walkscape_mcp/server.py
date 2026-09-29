@@ -398,6 +398,14 @@ def wiki_page(title: str, max_chars: int = 12000) -> str:
 
 
 @mcp.tool()
+def sell_candidates(top: int = 25) -> dict:
+    """What to sell for coins: owned stacks ranked by sell value (materials and consumables, plus spare copies of
+    gear beyond the best owned quality), each marked sell or keep. keep says why: an unfinished achievement needs
+    the item or uses it as a crafting material, or a saved goal names it. Also the nearest shop that buys anything."""
+    return s().sell_candidates(top)
+
+
+@mcp.tool()
 def whats_new(since: int | None = None) -> dict:
     """What's new in WalkScape: the latest game version and its change log from the wiki (new activities, items,
     pets, locations, fixes), whether the server's game data has caught up, what changed in the game data at its

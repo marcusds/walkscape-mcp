@@ -228,3 +228,20 @@ def test_material_options_are_combined(svc):
     mat = out["materials"][0]
     assert mat["short"] == 0 and out["steps_gathering_shortfall"] == 0
     assert mat.get("plus_owned"), mat
+
+
+def test_sell_candidates_keeps_what_achievements_need(svc):
+    out = svc.sell_candidates(top=500)
+    sell, keep = {r["item"] for r in out["sell"]}, {r["item"] for r in out["keep"]}
+    assert not sell & keep and all("keep" in r for r in out["keep"])
+    assert [r["coins"] for r in out["sell"]] == sorted((r["coins"] for r in out["sell"]), reverse=True)
+    # Shield Wall still to do: the ore and scrap behind the shields are kept
+    if "Shield Wall" not in {n for n, v in svc._info()["achievements"].items() if v.get("unlocked")}:
+        assert not {"Metal scrap", "Tarsilium ore"} & sell
+
+
+def test_shop_purchases_are_parsed():
+    from walkscape_mcp.services import parse_shop_buys
+    assert parse_shop_buys("x\nPurchases\nAll normal items may be sold at this shop.") == "all"
+    assert parse_shop_buys("x\nPurchases\nNothing may be sold at this shop.") == "none"
+    assert parse_shop_buys("x\nPurchases\nOnly these items may be sold at this shop.") == "some"

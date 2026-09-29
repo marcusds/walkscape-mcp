@@ -15,9 +15,10 @@ import re
 import time
 
 from .paths import wiki_dir
-from .services import parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_stock
+from .services import (parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_buys,
+                       parse_shop_stock)
 
-INDEX_VERSION = 4  # bump when the index layout or a parser changes, so old indexes are rebuilt
+INDEX_VERSION = 5  # bump when the index layout or a parser changes, so old indexes are rebuilt
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 N = r"\[(?P<n>[\d,]+)\]"
 
@@ -151,6 +152,7 @@ def build(wiki) -> dict:
         b["requirements"] = parse_building_requirements(page)
         currency = "adventurers_guild_token" if "Outpost" in b["types"] else "coins"
         b["sells"] = [{**x, "currency": currency} for x in parse_shop_stock(page)]
+        b["buys"] = parse_shop_buys(page)
     return {"version": INDEX_VERSION, "tag": wiki.version(), "built_at": time.time(),
             "services": services, "buildings": buildings,
             "achievements": parse_achievements_page(wiki.page("Achievements", 1_000_000))}
