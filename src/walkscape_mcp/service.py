@@ -260,6 +260,24 @@ class Service:
             out["new_on_wiki_not_in_data"] = fresh
         return out
 
+    def total_wealth(self) -> int:
+        """What the game counts as total wealth (the All The Things I Could Do / Time To Party achievements):
+        coins plus the sell value of every item owned, gear at its quality."""
+        gd, p = self.gd, self._player
+        if not p:
+            return 0
+        value = lambda i: ((gd.items.get(i) or {}).get("itemValue") or {})
+        total = p.coins
+        for iid, (n, fine) in p.item_counts.items():
+            v = value(iid)
+            if v.get("currency") == "money" and not gd.items[iid].get("gearType"):
+                total += n * (v.get("value") or {}).get("common", 0) + fine * (v.get("value") or {}).get("fine", 0)
+        for key, oi in p.owned_gear.items():
+            v = value(oi.id)
+            if v.get("currency") == "money":
+                total += p.gear_copies.get(key, 1) * (v.get("value") or {}).get(oi.quality, 0)
+        return total
+
     def _keep_reasons(self) -> dict[str, str]:
         """item id -> why to keep it: an unfinished achievement needs it (to own or collect) or needs it to craft
         something, following recipes two levels down (shield <- bar <- ore/coal/scrap); or a saved goal names it
@@ -1014,13 +1032,14 @@ class Service:
                 kid = self._keyword_id(g["keyword"])
                 out["ways"] = self._ways(a for a, x in gd.activities.items() if kid in (x.get("keywords") or []))
             elif t in ("total_steps", "character_level", "skill_level", "all_skills", "wealth") and p:
-                have = {"total_steps": p.steps, "character_level": p.char_level, "wealth": p.coins,
+                have = {"total_steps": p.steps, "character_level": p.char_level, "wealth": self.total_wealth(),
                         "skill_level": p.skill_levels.get(g.get("skill"), 1)}.get(t)
                 if t == "all_skills":
                     low = {k: v for k, v in p.skill_levels.items() if v < n}
                     out["progress"] = "done" if not low else f"below {n}: " + ", ".join(f"{k} {v}" for k, v in low.items())
                 else:
-                    out["progress"] = f"{have:,}/{n:,}" + (" (coins only; wealth may count more)" if t == "wealth" else "")
+                    out["progress"] = f"{have:,}/{n:,}" + (" (coins + the sell value of everything owned)"
+                                                           if t == "wealth" else "")
             elif t in ("gain_item", "gain_keyword", "craft_item", "craft_keyword"):
                 iid, kid = self._item_or_keyword(g.get("item") or g.get("keyword") or "")
                 ids = [iid] if iid else items_with(kid) if kid else []

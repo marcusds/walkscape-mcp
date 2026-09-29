@@ -245,3 +245,8 @@ def test_shop_purchases_are_parsed():
     assert parse_shop_buys("x\nPurchases\nAll normal items may be sold at this shop.") == "all"
     assert parse_shop_buys("x\nPurchases\nNothing may be sold at this shop.") == "none"
     assert parse_shop_buys("x\nPurchases\nOnly these items may be sold at this shop.") == "some"
+
+
+def test_total_wealth_counts_items(svc):
+    # the game's "total wealth" is coins plus what everything owned is worth
+    assert svc.total_wealth() > svc._player.coins

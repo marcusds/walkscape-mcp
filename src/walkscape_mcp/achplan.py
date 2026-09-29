@@ -463,7 +463,7 @@ class AchievementPlanner:
                    "akw": s._keyword_id(g.get("activity_keyword"))}
         elif t == "craft_skill":
             out["skill"] = g["skill"]
-        elif t == "wealth":  # coins: dropped (money loot rows) or from selling what drops
+        elif t == "wealth":  # wealth: coins dropped (money loot rows) plus the value of other drops
             out = {"items": {"coins"}, "fine": False, "skill": None, "akw": None, "value": True}
         g["_targets"] = out
         return out
@@ -512,9 +512,10 @@ class AchievementPlanner:
                 rows.append((aid, lv, n * seg["ev"].metrics["steps_per_action"], seg))
             return self._best(rows, n)
         if t == "wealth":
-            short = n - self.p.coins
+            # total wealth is coins plus the value of everything owned; recorded progress already lowered n
+            short = n if n < g["n"] else n - self.s.total_wealth()
             if short <= 0:
-                return {"steps": 0, "how": "already have the coins", "levels": {}, "segs": [], "per_unit": 0}
+                return {"steps": 0, "how": "already that wealthy", "levels": {}, "segs": [], "per_unit": 0}
             from .engine import Loadout, evaluate
             quick = []  # rank every doable activity by coins per step with no gear, then optimize the best few
             for aid in gd.activities:
@@ -528,7 +529,7 @@ class AchievementPlanner:
                 per_step = self._coins_per_step(seg["ev"])
                 if per_step > 0:
                     rows.append((aid, {}, short / per_step, seg))
-            est = self._best(rows, short, note="selling what it drops, plus coin drops; sell at a general store")
+            est = self._best(rows, short, note="the value of what it drops, plus coin drops; no need to sell")
             return {**est, "left": short}
         if t == "rare_egg":
             if not self.rare_egg_chance:
