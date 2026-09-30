@@ -91,6 +91,7 @@ def remember_player_info(
     reputation: dict[str, float] | None = None,
     achievement_points: int | None = None,
     carrying: list[str] | None = None,
+    equipped: list[str] | None = None,
 ) -> dict:
     """Store facts about the character that the save export doesn't include. Kept across sessions and save reloads.
 
@@ -123,11 +124,14 @@ def remember_player_info(
     reputation: faction reputation now, e.g. {"Jarvonia": 61}. achievement_points: the in-game total now.
     carrying: all gear the player has with them (equipped + inventory), replacing the save's; carried_only
       tools use it. A fresh save export is the easiest way to update it.
+    equipped: gear the player has put on since, e.g. ["Gem shield"] or ["tool_2: Hand lantern"] (rings and tools
+      need the slot). Loadouts keep worn gear in slots where the choice makes no difference, and diffs are
+      against it.
     Returns everything currently remembered."""
     return s().remember_player_info(completed, not_yet, notes, forget,
                                     achievements_unlocked, achievement_progress, achievements_not_unlocked,
                                     gear_found, skill_levels, item_counts, goals, goals_done, regions_explored,
-                                    location, reputation, achievement_points, carrying)
+                                    location, reputation, achievement_points, carrying, equipped)
 
 
 @mcp.tool()

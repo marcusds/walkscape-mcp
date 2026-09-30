@@ -51,7 +51,7 @@ from .optimizer import (
     quick_score,
 )
 from .paths import loadout_cache_file, player_file, player_info_file, save_history_dir, snapshot_dir
-from .player import SKILL_XP, OwnedItem, Player, parse_save, with_updates
+from .player import SAVE_SLOTS, SKILL_XP, OwnedItem, Player, parse_save, with_updates
 from .quality import at_least, quality_odds
 from .wiki import Wiki
 
@@ -92,7 +92,7 @@ def disk_memo(fn):
 SERVICE_KIND_OVERRIDES = {"heatstroke_metalworks": "forge", "granular_faceting_facility": "trinketry_bench"}
 STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
 NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
-SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried")
+SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried", "equipped")
 INPUT_CANDIDATES = 2  # input items (e.g. arrow types) costed when getting more; each runs plan_recipe
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
 
@@ -546,6 +546,7 @@ class Service:
             ("reputation", lambda k, e: save.reputation.get(k, 0) >= e["value"]),
             ("points", lambda k, e: save.achievement_points >= e["value"]),
             ("carried", lambda k, e: False),
+            ("equipped", lambda k, e: (w := save.equipped.get(k)) is not None and f"{w.id}@{w.quality}" == e["key"]),
         ):
             for k, e in list(since[section].items()):
                 if covered(k, e) or e.get("at_steps", 0) < save.steps:
@@ -565,6 +566,9 @@ class Service:
             return f"{e['value']} achievement points"
         if section == "carried":
             return f"carrying {len(e['items'])} gear pieces (equipped + inventory)"
+        if section == "equipped":
+            item_id, _, q = e["key"].partition("@")
+            return f"{key}: {self.gd.name(item_id)} ({q}) equipped"
         return f"{e['count']:,} {self.gd.name(key)}"
 
     def _realms(self) -> dict[str, str]:
@@ -807,7 +811,8 @@ class Service:
                              item_counts: dict[str, int] | None = None, goals: list[str] | None = None,
                              goals_done: list[str] | None = None, regions_explored: list[str] | None = None,
                              location: str | None = None, reputation: dict[str, float] | None = None,
-                             achievement_points: int | None = None, carrying: list[str] | None = None) -> dict:
+                             achievement_points: int | None = None, carrying: list[str] | None = None,
+                             equipped: list[str] | None = None) -> dict:
         with self._info_lock():
             info = self._info()
             skipped: list[str] = []  # one unusable entry shouldn't discard the rest of the call
@@ -817,7 +822,7 @@ class Service:
                 except KeyError as e:
                     skipped.append(e.args[0])
             self._remember_since_save(info, gear_found, skill_levels, item_counts, skipped, reputation,
-                                      achievement_points, carrying)
+                                      achievement_points, carrying, equipped)
             for g in goals_done or []:
                 info["goals"] = [x for x in info["goals"] if g.lower() not in x.lower()]
             info["goals"] += [g for g in goals or [] if g not in info["goals"]]
@@ -833,7 +838,7 @@ class Service:
         return out
 
     def _remember_since_save(self, info: dict, gear, skills, items, skipped: list[str], reputation=None,
-                             points=None, carrying=None):
+                             points=None, carrying=None, equipped=None):
         since, at = info["since_save"], {"at_steps": self._save.steps if getattr(self, "_save", None) else 0}
         factions = {norm(k): k for k in (self._save.reputation if getattr(self, "_save", None) else {})}
         factions |= {norm(k): k for k in self.gd.reputation_key_to_faction.values()}
@@ -889,6 +894,37 @@ class Service:
                     skipped.append(f"You don't own {spec!r}")
                 keys += owned[:1]  # list an item twice to carry two copies (e.g. two of a ring)
             since["carried"]["now"] = {"items": keys, **at}
+        for spec in equipped or []:
+            if (r := self._equip_spec(spec, since)) is None:
+                continue
+            if isinstance(r, str):
+                skipped.append(r)
+            else:
+                since["equipped"][r[0]] = {"key": r[1], **at}
+
+    def _equip_spec(self, spec: str, since: dict) -> tuple[str, str] | str:
+        """'Gem shield' / 'tool_2: Hand lantern (uncommon)' -> (save slot, owned gear key), or why not."""
+        slot, _, rest = spec.partition(":")
+        slot, spec = (norm(slot), rest) if rest and norm(slot) in SAVE_SLOTS else (None, spec)
+        try:
+            iid, q = self._parse_item_spec(spec)
+        except KeyError as e:
+            return e.args[0]
+        gear_type = self.gd.items[iid].get("gearType")
+        if not gear_type:
+            return f"{self.gd.name(iid)} isn't gear"
+        owned = [k for k, oi in self._player.owned_gear.items() if oi.id == iid and (not q or oi.quality == q.lower())]
+        owned += [k for k in since["gear"] if k.partition("@")[0] == iid and (not q or k.endswith("@" + q.lower()))]
+        if not owned:
+            return f"You don't own {spec.strip()!r}"
+        slots = [s for s, (t, _) in SAVE_SLOTS.items() if t == gear_type]
+        if slot is None:
+            if len(slots) != 1:
+                return f"Say which slot for {self.gd.name(iid)}, e.g. '{slots[0]}: {self.gd.name(iid)}'"
+            slot = slots[0]
+        elif slot not in slots:
+            return f"{self.gd.name(iid)} doesn't go in {slot} (slots: {', '.join(slots)})"
+        return slot, owned[0]
 
     def _remember(self, info, skipped, completed, not_yet, notes, forget, unlocked, progress, not_unlocked) -> dict:
         met = info["history"]

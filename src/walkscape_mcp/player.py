@@ -209,6 +209,13 @@ def with_updates(gd: GameData, player: Player, since: dict) -> Player:
     if (c := (since.get("carried") or {}).get("now")) and c.get("items") is not None:  # what's with them now
         carried = {k: owned[k] for k in c["items"] if k in owned}
         carried_copies = {k: c["items"].count(k) for k in carried}
+    equipped = dict(player.equipped)
+    for slot, e in (since.get("equipped") or {}).items():  # gear put on since (from the bank, if not carried)
+        if (oi := owned.get(e["key"])) is not None:
+            equipped[slot] = oi  # what it replaced stays carried, in the inventory
+            if e["key"] not in carried:
+                carried[e["key"]] = oi
+                carried_copies[e["key"]] = carried_copies.get(e["key"], 0) + 1
     for skill, e in (since.get("skills") or {}).items():
         xp[skill] = max(xp.get(skill, 0), SKILL_XP[min(e["level"], len(SKILL_XP)) - 1])
     for item_id, e in (since.get("items") or {}).items():
@@ -217,4 +224,4 @@ def with_updates(gd: GameData, player: Player, since: dict) -> Player:
             ids.add(item_id)
     return replace(player, owned_gear=owned, all_item_ids=ids, skill_xp=xp, item_counts=counts,
                    reputation=reputation, achievement_points=points, carried_gear=carried,
-                   gear_copies=copies, carried_copies=carried_copies)
+                   gear_copies=copies, carried_copies=carried_copies, equipped=equipped)

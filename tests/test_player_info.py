@@ -168,6 +168,16 @@ def test_carrying_gear_found_in_the_same_call(svc):
     assert {oi.id for oi in svc._player.carried_gear.values()} == {"adventuring_sewing_needle"}
 
 
+def test_equipped_since_save(svc):
+    out = svc.remember_player_info(gear_found=["Gem shield", "Hand lantern (uncommon)"],
+                                   equipped=["Gem shield", "Hand lantern", "tool 2: Hand lantern", "cape: Gem shield"])
+    assert len(out["skipped"]) == 2  # a tool needs its slot; a shield doesn't go on the cape
+    worn = svc._worn().slots
+    assert worn["secondary"].id == "gem_shield" and worn["tool1"].id == "hand_lantern"
+    assert any("secondary: Gem shield" in x for x in out["since_last_save"])
+    assert "gem_shield@common" in svc._player.carried_gear
+
+
 def test_save_history_and_compare(loading_svc, tmp_path, monkeypatch):
     svc = loading_svc
     save = json.loads(SAVE.read_text())
