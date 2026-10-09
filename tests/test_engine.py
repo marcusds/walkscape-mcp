@@ -169,4 +169,5 @@ def test_get_item_lists_a_keywords_items(svc):
 def test_get_item_shows_sell_value(svc):
     ring = svc.item_info("Silver opal ring")["sell_value"]
     assert ring["common (Normal)"] == "11 coins" and "ethereal (Eternal)" in ring
-    assert svc.item_info("Silver bar")["sell_value"] == {"normal": "7 coins", "fine": "38 coins"}
+    # +712 sells silver bars for 5 (fine 36, from the wiki: the game data no longer has fine values)
+    assert svc.item_info("Silver bar")["sell_value"] == {"normal": "5 coins", "fine": "36 coins"}

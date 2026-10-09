@@ -18,9 +18,9 @@ from .paths import wiki_dir
 from .services import (parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_buys,
                        parse_shop_stock)
 
-INDEX_VERSION = 5  # bump when the index layout or a parser changes, so old indexes are rebuilt
+INDEX_VERSION = 8  # bump when the index layout or a parser changes, so old indexes are rebuilt
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
-N = r"\[(?P<n>[\d,]+)\]"
+N = r"\[(?P<n>[\d,]+)%?\]"
 
 
 def index_file():
@@ -37,7 +37,9 @@ def parse_achievements_page(text: str) -> dict[str, dict]:
             difficulty = m[1].lower()
         elif m := ACHIEVEMENT_ROW.fullmatch(line):
             out[m["name"]] = {"difficulty": difficulty, "points": int(m["points"]), "requirements": m["requirements"],
-                              "rewards": m["rewards"], "goals": parse_achievement_goals(m["requirements"])}
+                              "rewards": m["rewards"], "goals": parse_achievement_goals(m["requirements"]),
+                              **({"disabled": True} if re.search(r"temporarily disabled", m["requirements"], re.I)
+                                 else {})}
     return out
 
 
@@ -45,12 +47,13 @@ def parse_achievements_page(text: str) -> dict[str, dict]:
 WHOLE_CLAUSES = [
     (rf"Have at least {N} (?P<quality>\w+) Loot items equipped\.",
      lambda m: {"type": "equip_quality", "quality": m["quality"].lower()}),
-    (rf"Have every skill at least level {N} \.", lambda m: {"type": "all_skills"}),
-    (rf"At least (?P<skill>\w+) {N} \.", lambda m: {"type": "skill_level", "skill": m["skill"].lower()}),
+    (rf"Have every skill at least level {N} ?\.", lambda m: {"type": "all_skills"}),
+    (rf"At least (?P<skill>\w+) {N} ?\.", lambda m: {"type": "skill_level", "skill": m["skill"].lower()}),
     (rf"Have any (?P<kw>.+?) stack at a quantity of {N}", lambda m: {"type": "stack", "keyword": m["kw"]}),
     (rf"Have a character level of {N}", lambda m: {"type": "character_level"}),
-    (rf"While having work efficiency at least {N} %\.", lambda m: {"type": "work_efficiency", "percent": True}),
+    (rf"While having work efficiency at least {N} ?%?\.", lambda m: {"type": "work_efficiency", "percent": True}),
     (rf"Sell things to {N} different shops\.", lambda m: {"type": "other"}),
+    (r"Ironfoot only(?: \([^)]*\))?\.?", lambda m: {"type": "ironfoot"}),  # characters that haven't traded
 ]
 
 # "<body> [N]" clauses, classified by their body
@@ -64,8 +67,11 @@ BODY_CLAUSES = [
     (r"Gain any (?P<kw>.+?) while (?P<skill>\w+)", lambda m: {"type": "gain_keyword", "keyword": m["kw"],
                                                               "skill": m["skill"].lower()}),
     (r"Gain any (?P<kw>.+?) as a drop from an activity\.", lambda m: {"type": "gain_keyword", "keyword": m["kw"]}),
-    (r'Gain a "fine" material from an activity\.', lambda m: {"type": "gain_keyword", "keyword": "material",
-                                                              "fine": True}),
+    (r'Gain an? "?fine"? material from an activity\.', lambda m: {"type": "gain_keyword", "keyword": "material",
+                                                                    "fine": True}),
+    (r'Gain (?:an? )?"?fine"? (?P<i>.+?)(?: from an activity\.)?', lambda m: {"type": "gain_item", "item": m["i"],
+                                                                             "fine": True}),
+    (r"Gain an? eternal (?P<kw>.+)", lambda m: {"type": "have_quality", "keyword": m["kw"], "quality": "eternal"}),
     (r'Gain a "fine" (?P<i>.+?) from an activity\.', lambda m: {"type": "gain_item", "item": m["i"], "fine": True}),
     (r"Gain a (?P<i>.+?) from a (?P<skill>\w+) recipe", lambda m: {"type": "craft_item", "item": m["i"]}),
     (r"Gain (?:a |an )?(?P<i>.+?) (?:as a drop )?from (?:any activity|an activity|activities)\.",
@@ -93,7 +99,7 @@ BODY_CLAUSES = [
     (r"Craft a perfect item\.", lambda m: {"type": "craft_quality", "keyword": None, "quality": "legendary"}),
     (r"Craft any (?P<kw>.+)", lambda m: {"type": "craft_keyword", "keyword": m["kw"]}),
     (r"Craft (?P<kw>.+?) items\.", lambda m: {"type": "craft_keyword", "keyword": m["kw"]}),
-    (r"Craft a (?P<i>.+?) \.", lambda m: {"type": "craft_item", "item": m["i"]}),
+    (r"Craft an? (?P<i>.+?) ?\.", lambda m: {"type": "craft_item", "item": m["i"]}),
     (r"Prepare drinks of (?P<kw>.+)", lambda m: {"type": "craft_keyword", "keyword": m["kw"]}),
     (r"Make a (?P<kw>.+)", lambda m: {"type": "craft_keyword", "keyword": m["kw"]}),
     (r"Have different types of (?P<kw>.+?) in your inventory at once\.", lambda m: {"type": "hold_distinct",
@@ -118,7 +124,8 @@ BODY_CLAUSES = [
 def parse_achievement_goals(text: str) -> list[dict]:
     """Split an achievement's requirement text into typed goals, each with its count `n` and the source `text`.
     Anything no pattern knows (hatch an egg, drop an item...) becomes {"type": "other"}."""
-    goals, rest = [], text.strip()
+    # +712 wording: "... from an activity ." and "Gain X (not from trading) [N]"
+    goals, rest = [], re.sub(r"\s+\.", ".", text.strip())
     while rest:
         for pat, make in WHOLE_CLAUSES:
             if m := re.match(pat + r"\s*", rest):
@@ -129,19 +136,27 @@ def parse_achievement_goals(text: str) -> list[dict]:
                 goals.append({"type": "other", "n": 1, "text": rest})
                 break
             body = m["body"].strip()
+            untraded = body.endswith("(not from trading)")
+            body = body.removesuffix("(not from trading)").strip()
             make = next((mk for pat, mk in BODY_CLAUSES if (bm := re.fullmatch(pat, body))), None)
             goal = make(bm) if make else {"type": "other"}
-            goals.append({**goal, "n": int(m["n"].replace(",", "")), "text": m[0].strip()})
+            goals.append({**goal, **({"not_traded": True} if untraded else {}), "n": int(m["n"].replace(",", "")),
+                          "text": m[0].strip()})
             rest = rest[m.end():]
             continue
-        goals.append({**make(m), "n": int(m["n"].replace(",", "")), "text": m[0].strip()})
+        goals.append({**make(m), "n": int((m.groupdict().get("n") or "1").replace(",", "")), "text": m[0].strip()})
         rest = rest[m.end():]
     return goals
 
 
 # ---------- the index ----------
 
-def build(wiki) -> dict:
+def parse_fine_value(page: str) -> int | None:
+    m = re.search(r"Fine Value: \| ([\d,]+)", page)
+    return int(m[1].replace(",", "")) if m else None
+
+
+def build(wiki, fine_items=()) -> dict:
     services = parse_services_page(wiki.page("Services", 1_000_000))
     buildings = parse_buildings_page(wiki.page("Buildings", 1_000_000))
     for name, b in buildings.items():
@@ -153,8 +168,15 @@ def build(wiki) -> dict:
         currency = "adventurers_guild_token" if "Outpost" in b["types"] else "coins"
         b["sells"] = [{**x, "currency": currency} for x in parse_shop_stock(page)]
         b["buys"] = parse_shop_buys(page)
+    fine_values = {}
+    for name in fine_items:  # the game data has no fine sell values; item pages do
+        try:
+            if (v := parse_fine_value(wiki.page(name, 3000))) is not None:
+                fine_values[name] = v
+        except Exception:
+            pass
     return {"version": INDEX_VERSION, "tag": wiki.version(), "built_at": time.time(),
-            "services": services, "buildings": buildings,
+            "services": services, "buildings": buildings, "fine_values": fine_values,
             "achievements": parse_achievements_page(wiki.page("Achievements", 1_000_000))}
 
 
@@ -164,7 +186,7 @@ def save(index: dict) -> None:
     os.replace(tmp, index_file())
 
 
-def load(wiki, update: bool = True) -> dict:
+def load(wiki, update: bool = True, fine_items=()) -> dict:
     """The index for the current wiki dump and live edits, rebuilding it if either (or the index layout) changed."""
     if update:
         try:
@@ -178,7 +200,7 @@ def load(wiki, update: bool = True) -> dict:
             return index
     except (FileNotFoundError, ValueError):
         pass
-    index = build(wiki)
+    index = build(wiki, fine_items)
     save(index)
     return index
 
@@ -187,12 +209,16 @@ def main():
     from .wiki import Wiki
 
     wiki = Wiki()
+    from .gamedata import GameData
+    from .sync import load_snapshot
+
     wiki.update(force=True)
-    index = build(wiki)
+    gd = GameData(load_snapshot() or {})
+    index = build(wiki, sorted({i["name"] for i in gd.items.values() if isinstance(i, dict) and i.get("canBeFine")}))
     save(index)
     goals = [g for a in index["achievements"].values() for g in a["goals"]]
     print(f"wiki {index['tag']}: {len(index['services'])} services, {len(index['buildings'])} buildings, "
-          f"{len(index['achievements'])} achievements ({sum(g['type'] != 'other' for g in goals)}/{len(goals)} "
+          f"{len(index['fine_values'])} fine sell values, {len(index['achievements'])} achievements ({sum(g['type'] != 'other' for g in goals)}/{len(goals)} "
           f"goals parsed) -> {index_file()}")
 
 

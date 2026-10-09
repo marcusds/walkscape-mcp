@@ -239,7 +239,7 @@ class AchievementPlanner:
     def _sell_value(self, iid: str, fine: bool = False) -> float:
         if iid == "coins":
             return 1.0
-        v = (self.gd.items.get(iid) or {}).get("itemValue") or {}
+        v = self.s._item_value(iid)
         if v.get("currency") != "money":
             return 0.0
         return float((v.get("value") or {}).get("fine" if fine else "common") or 0)
@@ -688,6 +688,8 @@ class AchievementPlanner:
                 raise NotEstimated(self._why_not(iid))
             return {"steps": c["steps"], "how": f"{gd.name(iid)} via {c['how']}", "levels": c["levels"],
                     "segs": c["segs"], "per_unit": None}
+        if t == "ironfoot":  # every character is Ironfoot until it gives that up to trade
+            return {"steps": 0, "how": "stay Ironfoot (don't trade)", "levels": {}, "segs": [], "per_unit": 0}
         if t == "while_skill":  # the work_efficiency (or other) goal beside it carries the cost
             return {"steps": 0, "how": f"while doing {g['skill']}", "levels": {}, "segs": [], "per_unit": 0}
         if t == "work_efficiency":
@@ -882,6 +884,9 @@ class AchievementPlanner:
         tasks, skipped, passive = {}, [], {}
         for name, a in achievements.items():
             if recorded.get(name, {}).get("unlocked"):
+                continue
+            if a.get("disabled"):
+                skipped.append({"name": name, "points": a["points"], "why": ["temporarily disabled in the game"]})
                 continue
             goals = a.get("goals") or []
             done_counts = [int(x.replace(",", "")) for x, _ in

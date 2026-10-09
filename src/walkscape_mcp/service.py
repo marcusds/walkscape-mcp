@@ -225,6 +225,8 @@ class Service:
                                                        self.gd.locations, self.gd.pets)
                  for k, x in coll.items() if isinstance(x, dict)}
         known |= {norm(b["name"]) for b in self.building_table().values()}
+        # "(Locations) 1 new activity added to an existing location" lists "<activity> at <location>"
+        is_known = lambda name: any(norm(n) in known for n in (name, name.split(" at ")[0]))
         if logs:
             lines = [ln.strip() for ln in list(logs.values())[-1].splitlines()]
             listed, missing = 0, []
@@ -232,7 +234,7 @@ class Service:
                 if m := re.match(r"\((Activities|Items|Locations|Pets|Buildings)\) (\d+) new", ln):
                     for name in lines[i + 1:i + 1 + int(m[2])]:
                         listed += 1
-                        if norm(name) not in known:
+                        if not is_known(name):
                             missing.append(name)
             if listed:
                 out["server_has_new_content"] = (f"yes: all {listed} new activities, items, locations, pets and "
@@ -251,14 +253,22 @@ class Service:
         except Exception:
             fresh = []
         # a new page about something the game data already has (e.g. "Bake bread (Recipe)") isn't new content
-        known = {norm(x.get("name") or k) for coll in (self.gd.items, self.gd.activities, self.gd.recipes,
-                                                       self.gd.locations, self.gd.pets)
-                 for k, x in coll.items() if isinstance(x, dict)}
-        known |= {norm(b["name"]) for b in self.building_table().values()}
         fresh = [t for t in fresh if norm(re.sub(r"\s*\([^)]*\)$", "", t)) not in known]
         if fresh:
             out["new_on_wiki_not_in_data"] = fresh
         return out
+
+    def _item_value(self, iid: str) -> dict:
+        """The item's itemValue, with the fine sell value from the wiki when the game data leaves it out (the
+        planner data stopped carrying fine values in +712)."""
+        item = self.gd.items.get(iid) or {}
+        v = item.get("itemValue") or {}
+        vals = v.get("value") or {}
+        if item.get("canBeFine") and "fine" not in vals and v.get("currency") == "money":
+            fine = (self._wiki_index().get("fine_values") or {}).get(item.get("name"))
+            if fine is not None:
+                v = {**v, "value": {**vals, "fine": fine}}
+        return v
 
     def total_wealth(self) -> int:
         """What the game counts as total wealth (the All The Things I Could Do / Time To Party achievements):
@@ -266,7 +276,7 @@ class Service:
         gd, p = self.gd, self._player
         if not p:
             return 0
-        value = lambda i: ((gd.items.get(i) or {}).get("itemValue") or {})
+        value = self._item_value
         total = p.coins
         for iid, (n, fine) in p.item_counts.items():
             v = value(iid)
@@ -341,11 +351,10 @@ class Service:
         anything."""
         gd, p = self.gd, self.player()
         keep = self._keep_reasons()
-        value = lambda i, q: ((gd.items.get(i) or {}).get("itemValue") or {})
         rows = []
         for iid, (n, fine) in p.item_counts.items():
             it = gd.items.get(iid) or {}
-            v = value(iid, None)
+            v = self._item_value(iid)
             if v.get("currency") != "money" or it.get("gearType"):
                 continue
             vals = v.get("value") or {}
@@ -358,7 +367,7 @@ class Service:
         for key, oi in p.owned_gear.items():
             by_item.setdefault(oi.id, []).append((QUALITIES.index(oi.quality), oi.quality, p.gear_copies.get(key, 1)))
         for iid, quals in by_item.items():
-            v = value(iid, None)
+            v = self._item_value(iid)
             if v.get("currency") != "money":
                 continue
             quals.sort(reverse=True)
@@ -592,11 +601,14 @@ class Service:
         idx = getattr(self, "_windex", None)
         if idx is None or idx.get("tag") != tag:
             try:
-                idx = wikidata.load(self.wiki)
+                idx = wikidata.load(self.wiki, fine_items=self._fine_item_names())
             except Exception:
                 idx = {"tag": tag, "services": {}, "buildings": {}, "achievements": {}}
             self._windex = idx
         return idx
+
+    def _fine_item_names(self) -> list[str]:
+        return sorted({i["name"] for i in self.gd.items.values() if isinstance(i, dict) and i.get("canBeFine")})
 
     def achievement_list(self) -> dict[str, dict]:
         """Every achievement on the wiki's Achievements page, by name, with its requirements parsed into goals."""
@@ -1229,7 +1241,7 @@ class Service:
                 "fine": [gd.describe_attr(a) for a in gd.consumable_attrs(item_id, True)],
                 "duration": item["buffs"][0].get("duration"),
             }
-        v = item.get("itemValue") or {}
+        v = self._item_value(item_id)
         if v.get("value") and v.get("currency") in ("money", "adventurers_guild_token"):
             unit = "coins" if v["currency"] == "money" else "guild tokens"
             out["sell_value"] = {("normal" if k == "common" and "fine" in v["value"] else

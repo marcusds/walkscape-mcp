@@ -1,4 +1,4 @@
-from walkscape_mcp.wikidata import parse_achievement_goals
+from walkscape_mcp.wikidata import parse_achievement_goals, parse_fine_value
 
 
 def goals(text):
@@ -18,9 +18,39 @@ def test_achievement_goals_are_typed():
     assert goals('Have obtained "fine" Saltrum [100] Have obtained an eternal Spectral Tool [1]') == [
         {"type": "have_item", "item": "Saltrum", "fine": True, "n": 100},
         {"type": "have_quality", "keyword": "Spectral Tool", "quality": "eternal", "n": 1}]
+    assert goals("Craft a Spectral pickaxe. [1]") == [{"type": "craft_item", "item": "Spectral pickaxe", "n": 1}]
     assert goals("Hatch a Mummy egg [1]") == [{"type": "hatch", "item": "Mummy egg", "n": 1}]
     assert goals("Claim a rare Pet egg [1]") == [{"type": "rare_egg", "n": 1}]
     assert goals("Drop an item. [1]") == [{"type": "other", "n": 1}]
+    # +712 wording
+    assert goals("Gain a Raw shark from an activity . [1]") == [{"type": "gain_item", "item": "Raw shark", "n": 1}]
+    assert goals("Gain a fine material from an activity . [1]") == [
+        {"type": "gain_keyword", "keyword": "material", "fine": True, "n": 1}]
+    assert goals("Gain a fine Trash from an activity . [1]") == [{"type": "gain_item", "item": "Trash", "fine": True,
+                                                                "n": 1}]
+    assert goals("Gain Ectoplasm (not from trading) [5,000]") == [
+        {"type": "gain_item", "item": "Ectoplasm", "not_traded": True, "n": 5000}]
+    assert goals("Gain fine Saltrum (not from trading) [100] Gain an eternal Spectral Tool (not from trading) [1]") == [
+        {"type": "gain_item", "item": "Saltrum", "fine": True, "not_traded": True, "n": 100},
+        {"type": "have_quality", "keyword": "Spectral Tool", "quality": "eternal", "not_traded": True, "n": 1}]
+    assert goals("While having work efficiency at least [130%] .") == [
+        {"type": "work_efficiency", "percent": True, "n": 130}]
+    assert goals("Have a total wealth of coins. [100,000] Ironfoot only (temporarily disabled - will be reworked).") == [
+        {"type": "wealth", "n": 100000}, {"type": "ironfoot", "n": 1}]
+
+
+def test_disabled_achievements_are_flagged_and_not_planned(svc, monkeypatch):
+    from walkscape_mcp.wikidata import parse_achievements_page
+
+    page = ("Hard Achievements\nRich | Have a total wealth of coins. [100,000] Ironfoot only (temporarily disabled - "
+            "will be reworked). | 5 x Achievement point\nPoor | Have a total wealth of coins. [10] Ironfoot only. | "
+            "1 x Achievement point")
+    parsed = parse_achievements_page(page)
+    assert parsed["Rich"].get("disabled") and not parsed["Poor"].get("disabled")
+    monkeypatch.setattr(svc, "achievement_list", lambda: parsed)
+    out = svc.plan_achievements(only=["Rich", "Poor"])
+    assert {"name": "Rich", "points": 5, "why": ["temporarily disabled in the game"]} in out["not_estimated"]
+    assert any(r["name"] == "Poor" for r in out["order"])  # Ironfoot only costs nothing
 
 
 def test_achievement_goal_views(svc):
@@ -52,7 +82,10 @@ def test_plan_achievements_shares_levelling(svc):
     assert [r["total_steps_walked"] for r in out["order"]] == sorted(r["total_steps_walked"] for r in out["order"])
 
 
-def test_plan_levels_reputation_and_counts_coins(svc):
+def test_plan_levels_reputation_and_counts_coins(svc, monkeypatch):
+    known = svc.achievement_list()
+    wealth = {k: v for k, v in known["All The Things I Could Do"].items() if k != "disabled"}
+    monkeypatch.setattr(svc, "achievement_list", lambda: {**known, "All The Things I Could Do": wealth})
     out = svc.plan_achievements(only=["Overprepared", "All The Things I Could Do", "Enter Sandman"])
     rows = {}
     for r in out["order"]:  # an egg's second row is its hatching
@@ -90,3 +123,8 @@ def test_owned_gear_counts_toward_gear_requirements(svc):
     pl = AchievementPlanner(svc)
     seg = pl._aseg("predator_fishing_spear", Objective("item", "raw_shark"), pl.prereqs("predator_fishing_spear")[0])
     assert seg["gear"] is not None and "spear" in seg["gear"]["how"].lower()
+
+
+def test_fine_value_from_item_page():
+    assert parse_fine_value("Silver bar\nType: | Material\nValue: | 5\nFine Value: | 36\nKeyword: | Bar") == 36
+    assert parse_fine_value("Copper sword\nType: | Weapon\nValue: | 3") is None
