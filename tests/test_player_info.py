@@ -178,6 +178,14 @@ def test_equipped_since_save(svc):
     assert "gem_shield@common" in svc._player.carried_gear
 
 
+def test_active_tasks_persist(svc):
+    out = svc.remember_player_info(tasks=["Fletch arrows", "Walk to Old Arena Ruins", "Lizard hunting to 40"])
+    assert out["active_tasks"][0].startswith("NOW: Fletch arrows")
+    out = svc.remember_player_info(tasks_done=["fletch"])
+    assert out["active_tasks"][0].startswith("NOW: Walk to Old Arena Ruins") and len(out["active_tasks"]) == 2
+    assert svc.player_summary()["remembered_info"]["active_tasks"] == out["active_tasks"]
+
+
 def test_save_history_and_compare(loading_svc, tmp_path, monkeypatch):
     svc = loading_svc
     save = json.loads(SAVE.read_text())

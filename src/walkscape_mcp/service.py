@@ -521,10 +521,13 @@ class Service:
             data = json.loads(f.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}
-        info = {"history": data.get("history") or {}, "notes": data.get("notes") or [],
+        # keep keys this version doesn't know, so an older server process sharing the file doesn't drop them
+        info = {**data, "history": data.get("history") or {}, "notes": data.get("notes") or [],
                 "achievements": data.get("achievements") or {}, "goals": data.get("goals") or [],
                 "explored": data.get("explored") or [], "location": data.get("location"),
-                "since_save": {k: (data.get("since_save") or {}).get(k) or {} for k in SINCE_SAVE_SECTIONS}}
+                "tasks": data.get("tasks") or [],
+                "since_save": {**(data.get("since_save") or {}),
+                               **{k: (data.get("since_save") or {}).get(k) or {} for k in SINCE_SAVE_SECTIONS}}}
         for n in list(info["notes"]):
             if m := ACHIEVEMENT_NOTE.fullmatch(n):
                 info["achievements"].setdefault(m["name"], {})["unlocked"] = True
@@ -824,7 +827,8 @@ class Service:
                              goals_done: list[str] | None = None, regions_explored: list[str] | None = None,
                              location: str | None = None, reputation: dict[str, float] | None = None,
                              achievement_points: int | None = None, carrying: list[str] | None = None,
-                             equipped: list[str] | None = None) -> dict:
+                             equipped: list[str] | None = None, tasks: list[str] | None = None,
+                             tasks_done: list[str] | None = None) -> dict:
         with self._info_lock():
             info = self._info()
             skipped: list[str] = []  # one unusable entry shouldn't discard the rest of the call
@@ -838,6 +842,11 @@ class Service:
             for g in goals_done or []:
                 info["goals"] = [x for x in info["goals"] if g.lower() not in x.lower()]
             info["goals"] += [g for g in goals or [] if g not in info["goals"]]
+            today = time.strftime("%Y-%m-%d")
+            if tasks is not None:  # the whole active plan, in order; replaces the previous one
+                info["tasks"] = [{"text": t, "since": today} for t in tasks]
+            for t in tasks_done or []:
+                info["tasks"] = [x for x in info["tasks"] if t.lower() not in x["text"].lower()]
             for r in regions_explored or []:
                 realms = {norm(v): k for k, v in self._realms().items()} | {k: k for k in self._realms()}
                 if (rid := realms.get(norm(r))) is None:
@@ -1007,6 +1016,10 @@ class Service:
         out["achievements_in_progress"] = {a: f"{v['progress']} (as of {v.get('updated', '?')})"
                                            for a, v in sorted(ach.items()) if v.get("progress") and not v.get("unlocked")}
         out["goals"] = info.get("goals") or []
+        if info.get("tasks"):
+            # the plan being worked through right now; the first is the current step
+            out["active_tasks"] = [f"{'NOW: ' if i == 0 else ''}{t['text']} (since {t['since']})"
+                                   for i, t in enumerate(info["tasks"])]
         if info.get("location") in self.gd.locations:
             out["current_location"] = self.gd.locations[info["location"]]["name"]
         if info.get("explored"):
@@ -1079,6 +1092,8 @@ class Service:
             elif t == "actions_keyword":
                 kid = self._keyword_id(g["keyword"])
                 out["ways"] = self._ways(a for a, x in gd.activities.items() if kid in (x.get("keywords") or []))
+            elif t == "wealth" and g.get("earned"):
+                out["progress"] = "coins earned by playing aren't in the save; check the achievement in-game"
             elif t in ("total_steps", "character_level", "skill_level", "all_skills", "wealth") and p:
                 have = {"total_steps": p.steps, "character_level": p.char_level, "wealth": self.total_wealth(),
                         "skill_level": p.skill_levels.get(g.get("skill"), 1)}.get(t)

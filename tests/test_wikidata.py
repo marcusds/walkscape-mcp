@@ -37,6 +37,7 @@ def test_achievement_goals_are_typed():
         {"type": "work_efficiency", "percent": True, "n": 130}]
     assert goals("Have a total wealth of coins. [100,000] Ironfoot only (temporarily disabled - will be reworked).") == [
         {"type": "wealth", "n": 100000}, {"type": "ironfoot", "n": 1}]
+    assert goals("Earn a total wealth of coins by playing. [100,000]") == [{"type": "wealth", "earned": True, "n": 100000}]
 
 
 def test_disabled_achievements_are_flagged_and_not_planned(svc, monkeypatch):

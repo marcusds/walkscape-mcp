@@ -512,8 +512,9 @@ class AchievementPlanner:
                 rows.append((aid, lv, n * seg["ev"].metrics["steps_per_action"], seg))
             return self._best(rows, n)
         if t == "wealth":
-            # total wealth is coins plus the value of everything owned; recorded progress already lowered n
-            short = n if n < g["n"] else n - self.s.total_wealth()
+            # total wealth is coins plus the value of everything owned; recorded progress already lowered n.
+            # "Earn ... by playing" (+714) counts coins earned, which the save doesn't have: all of n is left
+            short = n if n < g["n"] or g.get("earned") else n - self.s.total_wealth()
             if short <= 0:
                 return {"steps": 0, "how": "already that wealthy", "levels": {}, "segs": [], "per_unit": 0}
             from .engine import Loadout, evaluate

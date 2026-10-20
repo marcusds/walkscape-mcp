@@ -10,6 +10,10 @@ WalkScape gear/loadout optimizer backed by the official gear planner data (gear.
 and the WalkScape wiki (daily dump plus pages edited since).
 
 Workflow:
+0. At the start of a conversation call player_summary: its remembered_info has the user's goals, the active task
+   list (active_tasks, current step first) and where they are, so you can pick up where the last chat left off.
+   Keep active_tasks current with remember_player_info (tasks = the whole plan in order, tasks_done when a step is
+   finished) whenever you and the user settle on what to do next.
 1. If no character is loaded, ask the user to paste their exported character JSON and call load_player_save.
 2. Resolve names loosely: tools accept in-game names ("Crown of Cinders", "Adventurers' Guild token"), so call
    get_activity/get_item/optimize_loadout directly instead of search_game_data first. Make independent calls in parallel.
@@ -92,6 +96,8 @@ def remember_player_info(
     achievement_points: int | None = None,
     carrying: list[str] | None = None,
     equipped: list[str] | None = None,
+    tasks: list[str] | None = None,
+    tasks_done: list[str] | None = None,
 ) -> dict:
     """Store facts about the character that the save export doesn't include. Kept across sessions and save reloads.
 
@@ -127,11 +133,14 @@ def remember_player_info(
     equipped: gear the player has put on since, e.g. ["Gem shield"] or ["tool_2: Hand lantern"] (rings and tools
       need the slot). Loadouts keep worn gear in slots where the choice makes no difference, and diffs are
       against it.
+    tasks: the active plan, in order, replacing the previous one, e.g. ["Fletch ~170 bronze arrows at Kallaheim",
+      "Walk to Old Arena Ruins", "Lizard hunting to hunting 40"]. The first is what the user is doing now; these
+      survive a new conversation, so keep them current. tasks_done: remove tasks containing this text.
     Returns everything currently remembered."""
     return s().remember_player_info(completed, not_yet, notes, forget,
                                     achievements_unlocked, achievement_progress, achievements_not_unlocked,
                                     gear_found, skill_levels, item_counts, goals, goals_done, regions_explored,
-                                    location, reputation, achievement_points, carrying, equipped)
+                                    location, reputation, achievement_points, carrying, equipped, tasks, tasks_done)
 
 
 @mcp.tool()

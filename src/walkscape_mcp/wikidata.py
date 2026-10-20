@@ -18,7 +18,7 @@ from .paths import wiki_dir
 from .services import (parse_building_requirements, parse_buildings_page, parse_services_page, parse_shop_buys,
                        parse_shop_stock)
 
-INDEX_VERSION = 8  # bump when the index layout or a parser changes, so old indexes are rebuilt
+INDEX_VERSION = 9  # bump when the index layout or a parser changes, so old indexes are rebuilt
 ACHIEVEMENT_ROW = re.compile(r"(?P<name>[^|]+?) \| (?P<requirements>.+?) \| (?P<rewards>.*?\b(?P<points>\d+) x Achievement point.*)")
 N = r"\[(?P<n>[\d,]+)%?\]"
 
@@ -110,6 +110,7 @@ BODY_CLAUSES = [
     (r"Have (?:several |a |an )?(?P<kw>.+?) equipped(?: at once)?\.", lambda m: {"type": "equip_keyword",
                                                                                  "keyword": m["kw"]}),
     (r"Have a total wealth of coins\.", lambda m: {"type": "wealth"}),
+    (r"Earn a total wealth of coins by playing\.", lambda m: {"type": "wealth", "earned": True}),
     (r'Have obtained "fine" (?P<i>.+)', lambda m: {"type": "have_item", "item": m["i"], "fine": True}),
     (r"Have obtained an? (?P<q>normal|good|great|excellent|perfect|eternal) (?P<kw>.+)",
      lambda m: {"type": "have_quality", "keyword": m["kw"], "quality": m["q"]}),
