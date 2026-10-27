@@ -63,7 +63,7 @@ ACHIEVEMENT_NOTE = re.compile(r"Unlocked achievement: (?P<name>[^(]+?)\s*(\(.*)?
 SERVICE_KINDS = ("kitchen", "loom", "workshop", "trinketry_bench", "sawmill", "forge", "mailbox", "wardrobe",
                  "mysterious_merchant")
 # services whose id and icon don't name their kind (the wiki: smithing and trinketry bonuses)
-LOADOUT_CACHE_VERSION = 5  # bump when the optimizer, engine or a memoized planner changes its results
+LOADOUT_CACHE_VERSION = 6  # bump when the optimizer, engine or a memoized planner changes its results
 
 
 def disk_memo(fn):
@@ -90,11 +90,49 @@ def disk_memo(fn):
         return out
     return wrapper
 SERVICE_KIND_OVERRIDES = {"heatstroke_metalworks": "forge", "granular_faceting_facility": "trinketry_bench"}
-STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; crafted items, gear and chests stack to 10
-NO_INVENTORY_SLOT = {"other", "collectible"}  # currencies (tokens, chips) and collectibles don't take slots
+INVENTORY_SLOTS = 28  # the soft cap before gear's inventory space; each slot over it costs work efficiency
+STACK_SIZE = {"material": 25, "consumable": 20}  # per the wiki; loot, crafted items and gear stack to 10
+STACK_KEYWORDS = {"heavy": 1, "medium": 100, "light": 1000, "ultra_light": 10000}  # override the type's stack
+# currencies (tokens, chips) and collectibles don't take slots; chests and openables wait in the treasury
+NO_INVENTORY_SLOT = {"other", "collectible", "container"}
 SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried", "equipped")
 INPUT_CANDIDATES = 2  # input items (e.g. arrow types) costed when getting more; each runs plan_recipe
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
+
+
+def stack_size(gd: GameData, iid: str) -> int | None:
+    """How many of an item fit in one inventory slot (None: it takes no slot)."""
+    item = gd.items.get(iid) or {}
+    if item.get("type") in NO_INVENTORY_SLOT:
+        return None
+    kws = [STACK_KEYWORDS[k] for k in item.get("keywords") or [] if k in STACK_KEYWORDS]
+    return kws[0] if kws else STACK_SIZE.get(item.get("type"), 10)
+
+
+def slots_for(gd: GameData, counts: dict[str, float]) -> int:
+    """Inventory slots these item counts take (normal quality; fine ones would be separate stacks)."""
+    return sum(math.ceil(n / st) for i, n in counts.items() if n > 0 and (st := stack_size(gd, i)))
+
+
+def free_slots(metrics: dict) -> int:
+    """Slots a loadout can fill before being overencumbered: 28 plus its gear's inventory space."""
+    return max(0, INVENTORY_SLOTS + round(metrics.get("inventory_space") or 0))
+
+
+def actions_per_trip(free: int, loads: list[tuple[int, float, bool]], cap: int = 10 ** 7) -> int | None:
+    """Most actions (or crafts) one trip from a bank holds. loads are (stack size, items per action, whole): whole
+    loads (inputs carried, crafted output) take a slot from the first item, drops only once a whole expected item
+    is in (as in inventory_fill, so a 5% chance doesn't take a slot at once). At least 1; None if `cap` still fit."""
+    def slots(k: int) -> int:
+        return sum(math.ceil((k * q if whole else math.floor(k * q)) / st) for st, q, whole in loads)
+
+    if not loads or slots(cap) <= free:
+        return None
+    lo, hi = 0, cap  # slots(lo) fits, slots(hi) doesn't
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if slots(mid) <= free else (lo, mid)
+    return max(1, lo)
 
 
 class Service:
@@ -1644,8 +1682,11 @@ class Service:
             gd, opts = self.gd, []
             best_farm = self._farm_rate(item_id, near, pet)
             if best_farm:
+                steps = best_farm["steps_per_item"] * count
+                if inv := best_farm.get("inventory"):  # walks to the bank as the inventory fills
+                    steps += self._trips(inv, steps, per="steps_per_trip")["extra_travel_steps"]
                 opts.append({"how": f"{best_farm['activity']} @ {best_farm['location']}",
-                             "steps": round(best_farm["steps_per_item"] * count), "farm": best_farm})
+                             "steps": round(steps), "farm": best_farm})
             for src in gd.item_sources.get(item_id, []):
                 if src["kind"] != "recipe":
                     continue
@@ -1882,6 +1923,80 @@ class Service:
                     dist[v], prev[v] = d + r["distance"], (u, r)
                     heapq.heappush(pq, (dist[v], v))
         return dist, prev
+
+    # ---------- inventory and bank trips ----------
+
+    def _bank_distances(self) -> dict[str, tuple[float, str]]:
+        """Location id -> (base steps to the nearest bank the character can use, that bank's location), over legs
+        it can travel: one search back from every bank (deposit and withdraw, entry met), cached per character."""
+        cache = self.__dict__.setdefault("_bank_cache", {})
+        p = self._player
+        if id(p) in cache and cache[id(p)][0] is p:  # keeping the character alive keeps its id unique
+            return cache[id(p)][1]
+        banks = set()
+        travel = self._context("travelling", None) if p else None
+        for b in self.building_table().values():
+            if "Deposit" in b["actions"] and "Withdraw" in b["actions"] and (
+                    not b["requirements"] or not p or check_all(b["requirements"], travel, None)):
+                banks.add(b["location"])
+        graph, out = self._route_graph(), {}
+        pq = [(0.0, lid, lid) for lid in banks]
+        heapq.heapify(pq)
+        while pq:
+            d, u, bank = heapq.heappop(pq)
+            if u in out:
+                continue
+            out[u] = (d, bank)
+            for v, r in graph.get(u, []):  # the leg walked is v -> u, toward the bank
+                if v in out:
+                    continue
+                ctx = self._leg_context(v, r)
+                if check_all([q for q in ctx.activity["requirements"] if q["type"] not in GEAR_DEPENDENT_REQS],
+                             ctx, None):
+                    heapq.heappush(pq, (d + r["distance"], v, bank))
+        cache[id(p)] = (p, out)
+        return out
+
+    def _activity_loads(self, aid: str, ev, keep_drops: bool) -> list[tuple[int, float, bool]]:
+        """What an action fills the inventory with, per action (see actions_per_trip): the inputs it uses up (of
+        each, the one the character has most of, else the smallest stack) and, if kept, its drops."""
+        gd, loads = self.gd, []
+        spa = ev.metrics["steps_per_action"]
+        for _, ids, n in self._input_options(aid):
+            stacks = [(sum(self._player.item_counts.get(i, (0, 0))) if self._player else 0, -st, st)
+                      for i in ids if (st := stack_size(gd, i))]
+            if stacks:
+                loads.append((max(stacks)[2], float(n), True))
+        if keep_drops or loads:
+            for d in drop_report(ev, 10_000):
+                if (st := stack_size(gd, d["id"])) and d["per_1000_steps"]:
+                    loads.append((st, d["per_1000_steps"] / 1000 * spa, False))
+        return loads
+
+    def _trip_limit(self, aid: str, lid: str | None, ev, keep_drops: bool = True) -> dict | None:
+        """One trip's worth of an activity before banking: the actions that fit the free slots (inputs carried plus
+        drops, or only with inputs if drops aren't kept) and the round trip to the nearest bank (0 when there's one
+        here). None if it never needs a bank trip."""
+        free = free_slots(ev.metrics)
+        per_trip = actions_per_trip(free, self._activity_loads(aid, ev, keep_drops))
+        if per_trip is None or not lid:
+            return None
+        d, bank = self._bank_distances().get(lid, (math.inf, None))
+        return {"free_slots": free, "actions_per_trip": per_trip,
+                "steps_per_trip": round(per_trip * ev.metrics["steps_per_action"]),
+                "bank": self.gd.locations[bank]["name"] if bank else None,
+                "bank_round_trip_base_steps": 2 * d if math.isfinite(d) else None}
+
+    def _trips(self, limit: dict | None, amount: float, factor: float | None = None,
+               per: str = "actions_per_trip") -> dict | None:
+        """{"trips", "extra_travel_steps"} for `amount` actions (or steps, with per="steps_per_trip"): a bank round
+        trip (base steps × the travel factor) between trips, none after the last."""
+        if not limit:
+            return None
+        trips = max(1, math.ceil(round(amount, 6) / max(limit[per], 1)))
+        rt = limit["bank_round_trip_base_steps"] or 0
+        factor = self._travel_factor() if factor is None and rt and trips > 1 else factor or 0.0
+        return {"trips": trips, "extra_travel_steps": round((trips - 1) * rt * factor)}
 
     def find_services(self, service: str, near: str | None = None, top: int = 5) -> dict:
         gd = self.gd
@@ -2179,8 +2294,9 @@ class Service:
                 r["hidden_activity"] = f"only visible after {'; '.join(hidden_until[(a, l)])} (assumed done)"
             if src:
                 r["travel_steps"] = dist.get(loc_id.get(l), math.inf) if l else 0
+            ev = evaluate(ctx, lo, detail=False)
+            actions = v / ev.metrics["steps_per_action"]
             if self._input_options(ctx.activity_id):
-                actions = v / evaluate(ctx, lo).metrics["steps_per_action"]
                 r["actions_per_item" if not targets else "actions"] = round(actions, 2)
                 if quantity or targets:
                     sup = self._input_supply(ctx.activity_id, math.ceil(actions * (quantity or 1)),
@@ -2188,8 +2304,15 @@ class Service:
                     r["inputs"], r["input_steps"] = sup["inputs"], sup["steps"]
                 else:
                     r["uses_up_each_action"] = self._activity_inputs(ctx.activity_id)
+            limit = self._trip_limit(ctx.activity_id, ctx.location_id, ev)
+            if limit and limit["bank_round_trip_base_steps"] != 0:  # no bank here: full inventories mean a walk
+                r["inventory"] = {k: limit[k] for k in ("free_slots", "steps_per_trip", "bank",
+                                                        "bank_round_trip_base_steps")}
+                if quantity or targets:
+                    r["inventory"].update(self._trips(limit, actions * (quantity or 1)))
             if quantity or targets:
-                r["total_steps"] = round(r.get("travel_steps", 0) + v * (quantity or 1) + r.get("input_steps", 0))
+                r["total_steps"] = round(r.get("travel_steps", 0) + v * (quantity or 1) + r.get("input_steps", 0)
+                                         + r.get("inventory", {}).get("extra_travel_steps", 0))
             return r
 
         ranked = [row(*r) for r in rows]
@@ -2213,7 +2336,8 @@ class Service:
             out["note"] += " travel_steps is base route distance from 'from' (plan_route has it with travel gear)."
         if quantity or targets:
             out["note"] += (" total_steps adds up the farming" + (", travel" if src else "")
-                            + " and getting any inputs (arrows, traps...) beyond what you have.")
+                            + ", getting any inputs (arrows, traps...) beyond what you have, and walks to the "
+                              "nearest bank when the inventory fills (inventory.extra_travel_steps).")
         if self._player:
             out["you_have"] = {gd.name(t): self._have(t) for t in tids} if targets else self._have(tids[0])
         if blocked:
@@ -2488,7 +2612,7 @@ class Service:
         per_completion = out_n * (1 + m["double_rewards"])
         completions = math.ceil(count / per_completion)
         steps = round(completions * m["steps_per_action"])  # a double action is a free extra completion
-        materials, gather_total, missing = [], 0, []
+        materials, gather_total, missing, loads = [], 0, [], []
         src = self._near(near)
         near_name = gd.locations[src]["name"] if src else None
         for group in r.get("materials") or []:
@@ -2543,7 +2667,8 @@ class Service:
                     if not self._supplying:  # top-level plan: rank again for this quantity, counting travel
                         best = self.rank_activities(pick["id"], top=1, pet=pet, near=near_name,
                                                     quantity=pick["short"])["ranking"][0]
-                    farm = round(best["steps_per_item"] * pick["short"])
+                    farm = round(best["steps_per_item"] * pick["short"]) + (
+                        best.get("inventory", {}).get("extra_travel_steps") or 0)
                     pick["gather"] = {**best, "steps_for_shortfall": farm}
                     gather_total += farm
             combined = [c for c in combined if c["id"] != pick.get("id")]
@@ -2552,13 +2677,34 @@ class Service:
                                       for c in combined]
             if len(rows) > 1:
                 pick["alternatives"] = [x["item"] for x in rows if x["id"] != pick["id"]]
+            if st := stack_size(gd, pick["id"]):  # carried to the service, all of each craft's (conservative)
+                loads.append((st, next(o["amount"] for o in opts if o["item"] == pick["id"]), True))
             del pick["id"]
             materials.append(pick)
+        if st := stack_size(gd, out_item):
+            loads.append((st, per_completion, True))
+        inventory = None
+        if per_trip := actions_per_trip(free_slots(m), loads):
+            trips = math.ceil(completions / per_trip)
+            inventory = {"free_slots": free_slots(m), "crafts_per_trip": min(per_trip, completions), "trips": trips}
+            if not self._recipe_service_req(rid):
+                inventory.update(bank="craft at a bank (no service needed)", extra_travel_steps=0)
+            elif ctx.service:
+                d, bank = self._bank_distances().get(ctx.location_id, (math.inf, None))
+                inventory.update(
+                    bank=gd.locations[bank]["name"] + (" (where the service is)" if d == 0 else "")
+                    if bank else "none reachable",
+                    extra_travel_steps=round((trips - 1) * 2 * d * self._travel_factor())
+                    if trips > 1 and math.isfinite(d) else 0)
+            else:
+                inventory.update(bank=None, extra_travel_steps=0)
         out = {
             "recipe": r["name"], "makes": f"{count} {gd.name(out_item)}",
             "completions": completions, "crafting_steps": steps, "materials": materials,
             **({"craft_at": f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"} if ctx.service else {}),
-            "steps_gathering_shortfall": gather_total, "total_steps": steps + gather_total,
+            **({"inventory": inventory} if inventory else {}),
+            "steps_gathering_shortfall": gather_total,
+            "total_steps": steps + gather_total + (inventory["extra_travel_steps"] if inventory else 0),
             **({"total_steps_leaves_out": f"{', '.join(missing)}: the character can't farm or craft it yet "
                                           "(see its blocked_activities), so the plan can't be completed as is"}
                if missing else {}),
@@ -2578,7 +2724,10 @@ class Service:
                                           "location": here[0][1], "base_steps": here[0][0]}
         out["notes"] = ["Expected values: double rewards add output, double action halves steps per completion, "
                         "'no materials consumed' saves ingredients.",
-                        "Gathering steps exclude travel; rank_activities/plan_route give the trips."]
+                        "Gathering steps exclude travel to the farm; rank_activities/plan_route give the trips.",
+                        "inventory: crafts per trip are those whose materials and output fit the free slots (28 plus "
+                        "gear's inventory space, with an emptied inventory); between trips it walks to the nearest "
+                        "bank and back (base distance × your travel gear's speed), counted in total_steps."]
         return out
 
     def _quality_name(self, q: str) -> str:
@@ -2668,7 +2817,12 @@ class Service:
                 sup = self._input_supply(aid, out["completions"], pet=pet)
                 out["inputs"] = sup["inputs"]
                 out["steps_getting_inputs"] = sup["steps"]
-                out["total_steps"] = out["steps"] + sup["steps"]
+                extra = 0
+                if limit := self._trip_limit(aid, ctx.location_id, ev, keep_drops=False):  # restocking inputs
+                    out["inventory"] = {**{k: limit[k] for k in ("free_slots", "actions_per_trip", "bank")},
+                                        **self._trips(limit, out["completions"])}
+                    extra = out["inventory"]["extra_travel_steps"]
+                out["total_steps"] = out["steps"] + sup["steps"] + extra
         return out
 
     def inventory_fill(self, activity: str, free_slots: int, location: str | None = None,
@@ -2683,10 +2837,9 @@ class Service:
         held = {gd.resolve(k, "item"): int(v) for k, v in (inventory or {}).items()}
         drops = []
         for d in drop_report(ev, 100):
-            item = gd.items.get(d["id"], {})
-            if item.get("type") in NO_INVENTORY_SLOT or not d["per_1000_steps"]:
+            if not (stack := stack_size(gd, d["id"])) or not d["per_1000_steps"]:
                 continue
-            drops.append((d["id"], d["per_1000_steps"] / 1000, STACK_SIZE.get(item.get("type"), 10)))
+            drops.append((d["id"], d["per_1000_steps"] / 1000, stack))
 
         def new_slots(iid: str, rate: float, stack: int, steps: float) -> int:
             h = held.get(iid, 0)  # count whole expected items, so a 5% chest chance doesn't take a slot at once
@@ -2709,7 +2862,8 @@ class Service:
                                "new_slots": new_slots(iid, rate, stack, steps)}
                               for iid, rate, stack in sorted(drops, key=lambda x: -x[1]) if rate * steps >= 0.5],
             "notes": ["Expected values with " + ("the given gear set" if gear_set else "the character's equipped gear") + ".",
-                      "Stacks: materials 25, consumables 20, everything else 10 (wiki); currencies and collectibles "
+                      "Stacks (wiki): materials 25, consumables 20, everything else 10; the heavy, medium, light and "
+                      "ultra light keywords make it 1, 100, 1,000 and 10,000. Currencies, collectibles and chests "
                       "take no slot. Pass inventory with current counts so partly filled stacks are counted."],
         }
 

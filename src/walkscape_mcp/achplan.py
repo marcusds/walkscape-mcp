@@ -42,6 +42,7 @@ class AchievementPlanner:
         self._xp_rates: dict = {}
         self._stack: dict = {}
         self._drops: dict = {}
+        self._trip_limits: dict = {}
         self._dists: dict = {}
         self._travel_factor: float | None = None
         self.start = svc._near(None)
@@ -286,8 +287,9 @@ class AchievementPlanner:
                             levels = {**levels, **{k: max(levels.get(k, 0), v) for k, v in more["levels"].items()}}
                 else:
                     seg = self._aseg(src["id"], Objective("item", iid), levels)
+                    farm = count * Objective("item", iid).value(seg["ev"])
                     steps = math.inf if seg["gear"] is None else \
-                        count * Objective("item", iid).value(seg["ev"]) + seg["gear"]["steps"]
+                        farm + seg["gear"]["steps"] + self._bank_travel(seg, farm, True)[0]
             if math.isfinite(steps):
                 rows.append((steps + sum(self.level_steps(k, self._now(k), v)
                                          for k, v in levels.items()), steps, levels, src["id"]))
@@ -530,7 +532,8 @@ class AchievementPlanner:
                 per_step = self._coins_per_step(seg["ev"])
                 if per_step > 0:
                     rows.append((aid, {}, short / per_step, seg))
-            est = self._best(rows, short, note="the value of what it drops, plus coin drops; no need to sell")
+            est = self._best(rows, short, note="the value of what it drops, plus coin drops; no need to sell",
+                             keep_drops=True)
             return {**est, "left": short}
         if t == "rare_egg":
             if not self.rare_egg_chance:
@@ -571,7 +574,7 @@ class AchievementPlanner:
                 per_step = self.produced(g, seg, 1.0)
                 if per_step > 0:
                     rows.append((aid, lv, n / per_step, seg))
-            return self._best(rows, n)
+            return self._best(rows, n, keep_drops=True)
         if t in ("craft_item", "craft_keyword", "craft_skill"):
             tg = self._targets(g)
             if t == "craft_skill":
@@ -830,21 +833,38 @@ class AchievementPlanner:
                 out["levels"][k] = max(out["levels"].get(k, 0), v)
         return out
 
-    def _best(self, rows, n: int, note: str | None = None) -> dict:
-        """Cheapest (aid, levels, steps, seg) including the levelling it needs from the character's current XP."""
+    def _bank_travel(self, seg: dict, steps: float, keep_drops: bool) -> tuple[float, int]:
+        """(steps, trips): walks to the nearest bank and back between trips when `steps` of an activity fill the
+        inventory with the inputs it carries and, if kept, its drops (service _trip_limit, cached per loadout)."""
+        if "aid" not in seg or not seg["locs"]:
+            return 0.0, 1
+        key = (id(seg["ev"]), keep_drops)
+        if key not in self._trip_limits:  # the evaluation is kept so its id stays unique
+            self._trip_limits[key] = (seg["ev"], self.s._trip_limit(seg["aid"], seg["locs"][0], seg["ev"], keep_drops))
+        t = self.s._trips(self._trip_limits[key][1], steps / seg["ev"].metrics["steps_per_action"],
+                          factor=self.travel_factor())
+        return (float(t["extra_travel_steps"]), t["trips"]) if t else (0.0, 1)
+
+    def _best(self, rows, n: int, note: str | None = None, keep_drops: bool = False) -> dict:
+        """Cheapest (aid, levels, steps, seg) including the levelling it needs from the character's current XP, the
+        inputs it uses up and the bank trips they (and its drops, if kept) need."""
         gear = lambda seg: seg.get("gear", {"steps": 0.0, "segs": [], "how": ""})
         rows = [r for r in rows if math.isfinite(r[2]) and gear(r[3]) is not None]
         if not rows:
             raise NotEstimated("no activity or recipe the character can use (or level into) drops or makes it")
         xp = self.p.skill_xp
         aid, levels, steps, seg = min(rows, key=lambda r: r[2] + gear(r[3])["steps"] + sum(
-            self.level_steps(k, xp.get(k, 0), v) for k, v in r[1].items()))
+            self.level_steps(k, xp.get(k, 0), v) for k, v in r[1].items())
+            + self._bank_travel(r[3], r[2], keep_drops)[0])
         g = gear(seg)
         how = self.gd.activity_like(aid)["name"] + (f" ({note})" if note else "") + (f" [{g['how']}]" if g["how"] else "")
         inputs = self._inputs(seg, steps)
         if inputs["steps"]:
             how += f" [inputs: {inputs['how']}]"
-        total = steps + g["steps"] + inputs["steps"]
+        bank, trips = self._bank_travel(seg, steps, keep_drops)
+        if bank:
+            how += f" [{trips - 1} bank round trips]"
+        total = steps + g["steps"] + inputs["steps"] + bank
         levels = {**levels, **{k: max(levels.get(k, 0), v) for k, v in inputs["levels"].items()}}
         return {"steps": total, "how": how, "levels": levels, "segs": [(seg, steps)] + g["segs"],
                 "per_unit": total / n}
@@ -1072,5 +1092,6 @@ class AchievementPlanner:
                         "achievements it advances (same activity's actions and drops, crafts, XP toward their "
                         "levels); that progress is then credited. Levels reached are shared. Steps include "
                         "travel from where the previous achievement ended (base distance × travel_factor, your "
-                        "travel gear's speed on a sample route). They're expected values, and loot luck can move "
-                        "them a lot. Progress recorded with remember_player_info is counted."}
+                        "travel gear's speed on a sample route) and walks to the nearest bank and back whenever a "
+                        "grind fills the inventory. They're expected values, and loot luck can move them a lot. "
+                        "Progress recorded with remember_player_info is counted."}

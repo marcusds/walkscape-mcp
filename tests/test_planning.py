@@ -34,7 +34,8 @@ def test_plan_recipe_and_steps_to_level(svc):
     wheat = out["materials"][0]
     assert wheat["item"] == "Wheat" and wheat["need"] > 0
     assert wheat["short"] == max(0, wheat["need"] - wheat["have"])
-    assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"]
+    bank = out.get("inventory", {}).get("extra_travel_steps", 0)
+    assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"] + bank
     cur = svc._player.skill_levels["cooking"]
     lvl = svc.steps_to_level("cooking", cur + 1, "Brew beer")
     assert lvl["xp_needed"] > 0 and lvl["steps"] == pytest.approx(lvl["xp_needed"] / lvl["xp_per_step"], abs=1)
@@ -116,7 +117,8 @@ def test_steps_to_level_flags_activities_above_your_level(svc):
     trap = out["inputs"][0]
     assert trap["input"].startswith("one hunting trap item") and trap["need"] == out["completions"]
     assert trap["get"]["item"] == "Boxtrap" and trap["get"]["steps"] == out["steps_getting_inputs"] > 0
-    assert out["total_steps"] == out["steps"] + out["steps_getting_inputs"]
+    bank = out.get("inventory", {}).get("extra_travel_steps", 0)
+    assert out["total_steps"] == out["steps"] + out["steps_getting_inputs"] + bank
 
 
 def test_rank_counts_the_inputs_used_up(svc):
@@ -126,7 +128,8 @@ def test_rank_counts_the_inputs_used_up(svc):
     assert out["ranking"]
     for r in out["ranking"]:
         assert r["inputs"][0]["input"].startswith("one arrows item") and r["input_steps"] > 0
-        assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 100 + r["input_steps"], abs=10)
+        bank = r.get("inventory", {}).get("extra_travel_steps", 0)
+        assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 100 + r["input_steps"] + bank, abs=10)
 
 
 def test_recipes_naming_their_service_by_keywords(svc):
@@ -160,7 +163,8 @@ def test_plan_recipe_crafts_or_flags_the_shortfall(svc):
     mats = {m["item"]: m for m in out["materials"]}
     assert mats["Bread"]["gather"]["craft"] == "Bake bread" and mats["Bread"]["gather"]["steps_for_shortfall"] > 0
     assert "cannot_get" in mats["Raw crab"]["gather"] and "Raw crab" in out["total_steps_leaves_out"]
-    assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"]
+    bank = out.get("inventory", {}).get("extra_travel_steps", 0)
+    assert out["total_steps"] == out["crafting_steps"] + out["steps_gathering_shortfall"] + bank
 
 
 def test_list_and_compare_activities(svc):
@@ -250,3 +254,64 @@ def test_shop_purchases_are_parsed():
 def test_total_wealth_counts_items(svc):
     # the game's "total wealth" is coins plus what everything owned is worth
     assert svc.total_wealth() > svc._player.coins
+
+
+def test_stack_sizes_follow_type_and_weight_keywords(gd):
+    from walkscape_mcp.service import actions_per_trip, free_slots, slots_for, stack_size
+
+    by_type = {t: next(i for i, it in gd.items.items() if it.get("type") == t and not
+                       set(it.get("keywords") or []) & {"heavy", "medium", "light", "ultra_light"})
+               for t in ("material", "consumable", "loot", "crafted")}
+    assert [stack_size(gd, by_type[t]) for t in ("material", "consumable", "loot", "crafted")] == [25, 20, 10, 10]
+    assert stack_size(gd, "oak_plank") == 25
+    assert stack_size(gd, "boxtrap") == 1000  # a light material
+    assert stack_size(gd, "large_stone") == 1  # heavy
+    assert stack_size(gd, "ectoplasm_scraps") == 100 and stack_size(gd, "ectoplasm") == 10000
+    assert stack_size(gd, "hunting_chest") is None and stack_size(gd, "adventurers_guild_token") is None
+    assert slots_for(gd, {"oak_plank": 51, "boxtrap": 1, "hunting_chest": 3}) == 4
+    assert free_slots({"inventory_space": 2}) == 30 and free_slots({"inventory_space": -2}) == 26
+    # 2 planks (25 a stack) make a trap (10 a stack): 10 crafts take 1 + 1 slots, 11 crafts 1 + 2
+    assert actions_per_trip(2, [(25, 2, True), (10, 1, True)]) == 10
+    assert actions_per_trip(28, [(25, 2, True), (1000, 1, True)]) == 337  # 27 slots of planks, 1 of traps
+    assert actions_per_trip(5, []) is None
+
+
+def test_plan_recipe_counts_trips_and_bank_walks(svc, monkeypatch):
+    from walkscape_mcp.service import actions_per_trip
+
+    svc.remember_player_info(location="Salsfirth")
+    out = svc.plan_recipe("Craft a boxtrap", 300)
+    inv = out["inventory"]
+    per_trip = actions_per_trip(inv["free_slots"], [(25, 2, True), (1000, 1, True)])
+    assert inv["crafts_per_trip"] == min(per_trip, out["completions"])
+    assert inv["trips"] == -(-out["completions"] // per_trip)
+    assert inv["bank"].startswith("craft at a bank") and inv["extra_travel_steps"] == 0  # no service needed
+    many = svc.plan_recipe("Craft a boxtrap", 3 * per_trip)["inventory"]
+    assert many["trips"] > 1 and many["crafts_per_trip"] == per_trip
+
+    beer = svc.plan_recipe("Brew beer", 400)
+    assert beer["inventory"]["trips"] > 1 and beer["inventory"]["extra_travel_steps"] == 0  # Salsfirth has a bank
+    # the same service with the nearest bank 500 base steps away: a round trip between trips
+    monkeypatch.setattr(svc, "_bank_distances", lambda: {lid: (500.0, "kallaheim") for lid in svc.gd.locations})
+    far = svc.plan_recipe("Brew beer", 401)  # another count: plan_recipe results are memoized per arguments
+    trips = far["inventory"]["trips"]
+    assert far["inventory"]["bank"] == "Kallaheim"
+    assert far["inventory"]["extra_travel_steps"] == round((trips - 1) * 1000 * svc._travel_factor()) > 0
+    assert far["total_steps"] == far["crafting_steps"] + far["steps_gathering_shortfall"] + \
+        far["inventory"]["extra_travel_steps"]
+
+
+def test_input_and_gathering_grinds_walk_to_the_bank(svc, monkeypatch):
+    out = svc.steps_to_level("hunting", 99, "Box trapping")  # traps carried along with what the trapping drops
+    inv = out["inventory"]
+    assert inv["trips"] == -(-out["completions"] // inv["actions_per_trip"]) > 1
+    assert out["total_steps"] == out["steps"] + out["steps_getting_inputs"] + inv["extra_travel_steps"]
+
+    monkeypatch.setattr(svc, "_bank_distances", lambda: {lid: (300.0, "kallaheim") for lid in svc.gd.locations})
+    rows = svc.rank_activities("Wheat", top=2, quantity=2000)["ranking"]
+    assert rows
+    for r in rows:
+        inv = r["inventory"]
+        assert inv["bank"] == "Kallaheim" and inv["bank_round_trip_base_steps"] == 600 and inv["trips"] > 1
+        assert inv["extra_travel_steps"] == round((inv["trips"] - 1) * 600 * svc._travel_factor()) > 0
+        assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 2000 + inv["extra_travel_steps"], abs=101)  # rounded rate

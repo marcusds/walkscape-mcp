@@ -161,13 +161,14 @@ def plan_achievements(targets: list[int] | None = None, only: list[str] | None =
                       pet: str | None = "auto", rare_egg_chance: float | None = None) -> dict:
     """Order the achievements the user hasn't unlocked by achievement points per step. Each gets a step estimate
     from its parsed goals (actions, drops, crafts, kinds of items to collect, stacks, levels, reputation, coins,
-    eggs to hatch, a work-efficiency target) with the best owned loadouts, including the levelling or reputation
-    it still needs, gear an activity requires but the user lacks, inputs it uses up (arrows, traps), materials,
-    shop purchases (guild tokens are farmed; coin prices are noted) and travel from where the previous
-    achievement ended. A grind also scores the share of other achievements it advances (the same activity's
-    actions and drops, crafts, XP and reputation toward their levels), and that progress is credited once it's
-    chosen; walking goals (total steps, character level) complete by themselves as steps add up. Each row: points,
-    steps, travel_steps and route, how, levelling, also_advances, running total of steps and points.
+    eggs to hatch, a work-efficiency target) with the best owned loadouts, including the levelling or reputation it
+    still needs, gear an activity requires but the user lacks, inputs it uses up (arrows, traps), materials, shop
+    purchases (guild tokens are farmed; coin prices are noted), travel from where the previous achievement ended,
+    and walks to the nearest bank when a grind fills the inventory. A grind also scores the share of other
+    achievements it advances (the same activity's actions and drops, crafts, XP and reputation toward their levels),
+    and that progress is credited once it's chosen; walking goals (total steps, character level) complete by
+    themselves as steps add up. Each row: points, steps, travel_steps and route, how, levelling, also_advances,
+    running total of steps and points.
     targets: point totals to report when they're reached (e.g. [180, 190] for the buckler and bandolier).
     only: plan just these achievements. rare_egg_chance: the chance a found egg is rare (e.g. 0.01), which the
     game data doesn't give; without it Rare Find isn't estimated. Coins count selling what grinds drop; eggs hatch
@@ -238,8 +239,11 @@ def rank_activities(target: str | None = None, top: int = 10, pet: str | None = 
       you have all of them.
     near: where the player starts (default: remembered current location). Each row then gets travel_steps, and
       rows that are closer but slower say below how many items they beat the fastest.
-    quantity: how many of `target` are wanted; ranks by total_steps: farming, travel from a start location, and
-      getting the inputs (arrows, traps) an activity uses up beyond what the character has.
+    quantity: how many of `target` are wanted; ranks by total_steps: farming, travel from a start location,
+      getting the inputs (arrows, traps) an activity uses up beyond what the character has, and walks to the
+      nearest bank and back each time the inventory fills.
+    Rows done away from a bank get inventory: free_slots (28 + gear's inventory space), steps_per_trip until
+      full, the nearest bank and its base round trip; with a quantity also trips and extra_travel_steps.
     fine: rank by steps per fine version of `target` (fine material finding gear) instead.
     carried_only: only gear that's equipped or in the inventory, for when the player isn't at a bank.
     Also returns how many the character has, sources they can't use yet with the unmet requirements, and
@@ -363,7 +367,10 @@ def plan_recipe(recipe: str, count: int, near: str | None = None, pet: str | Non
     material needed vs owned, and for any shortfall the cheaper of farming it (best place, steps) or crafting it
     (its own plan, materials included). A shortfall the character can't farm or craft yet is named in
     total_steps_leaves_out, with the activities that drop it and the levels they need (blocked_activities).
-    Also the nearest location with the required service (from `near`, default the remembered current location)."""
+    Also the nearest location with the required service (from `near`, default the remembered current location).
+    inventory: free_slots, crafts_per_trip (materials carried plus output must fit, by stack size), trips, the
+    bank used and extra_travel_steps walking to it and back between trips (none when the service has a bank),
+    which total_steps includes."""
     return s().plan_recipe(recipe, count, near, pet)
 
 
@@ -382,7 +389,8 @@ def steps_to_level(skill: str, level: int, activity: str | None = None, location
                    pet: str | None = "auto") -> dict:
     """XP the character needs to reach `level` in `skill`; with an activity or recipe, also the steps and
     completions to get there using the best owned XP loadout. For activities that use up inputs (arrows, traps),
-    total_steps adds farming or crafting the ones the character is short of."""
+    total_steps adds farming or crafting the ones the character is short of, and the walks to the nearest bank
+    to restock when they and the drops fill the inventory (inventory: actions_per_trip, trips, bank)."""
     return s().steps_to_level(skill, level, activity, location, pet)
 
 
@@ -391,7 +399,8 @@ def inventory_fill(activity: str, free_slots: int, location: str | None = None,
                    inventory: dict[str, int] | None = None, gear_set: str | None = None) -> dict:
     """Steps until an activity's drops fill `free_slots` more inventory slots (time to bank).
     inventory: current counts of items already in the inventory, e.g. {"Berries": 223}, so partly filled
-    stacks are counted. Uses the equipped gear, or gear_set (an export string, e.g. from optimize_loadout)."""
+    stacks are counted. Uses the equipped gear, or gear_set (an export string, e.g. from optimize_loadout).
+    Stacks: materials 25, consumables 20, other items 10; heavy/medium/light/ultra light items 1/100/1k/10k."""
     return s().inventory_fill(activity, free_slots, location, inventory, gear_set)
 
 
