@@ -25,22 +25,26 @@ USER_AGENT = "walkscape-mcp (personal gear optimizer; github.com/marcusds)"
 
 BULK_GETS = {
     "items_list": "items",
-    "items_categorized": "items/categorized_items",
-    "materials": "items/search?type=material&detailed=true",
-    "containers": "items/search?type=container&detailed=true",
-    "url_mapping": "items/url_mapping",
+    "pets_list": "pets",
+    "services_list": "services",
+}
+# Lists the planner now loads in one `bootstrap` request (snapshot key -> bootstrap key); identical to the old
+# per-list endpoints.
+BOOTSTRAP_KEYS = {
+    "items_categorized": "categorizedItems",
+    "materials": "materials",
+    "containers": "containers",
+    "url_mapping": "urlMapping",
     "activities_list": "activities",
     "locations_list": "locations",
     "routes": "routes",
     "keywords": "keywords",
     "skills": "skills",
     "stats": "stats",
-    "pets_list": "pets",
     "abilities_list": "abilities",
     "factions": "factions",
-    "services_list": "services",
-    "terrain_modifiers": "terrain_modifiers",
-    "global_variables": "global_variables",
+    "terrain_modifiers": "terrainModifiers",
+    "global_variables": "globalVariables",
     "recipes_list": "recipes",
     "loot_tables_list": "lootTables",
 }
@@ -87,8 +91,9 @@ async def fetch_snapshot(game_version: str | None = None) -> dict:
 
     async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
         keys = list(BULK_GETS)
-        bulk = await asyncio.gather(*(_get(client, sem, BULK_GETS[k]) for k in keys))
+        boot, *bulk = await asyncio.gather(_get(client, sem, "bootstrap"), *(_get(client, sem, BULK_GETS[k]) for k in keys))
         data = dict(zip(keys, bulk))
+        data.update({k: boot[b] for k, b in BOOTSTRAP_KEYS.items()})
         phase("bulk")
 
         data["activities"] = await _details(client, sem, "activities", [a["id"] for a in data["activities_list"]])

@@ -25,7 +25,7 @@ Two different things can go stale:
 | `gamedata.pet_attrs` (levels[level-1]) | bundle snippet | "pet_level_attrs" |
 | `gearset.py` import/export format | bundle snippet | "gear_set_import" |
 | `player.SKILL_XP` / `CHAR_STEPS` curves | wiki | "Wiki Skill_Experience", "Wiki Character_Level" |
-| `sync.BULK_GETS` / detail endpoints | planner API calls | "Planner API endpoints" |
+| `sync.BULK_GETS` / `BOOTSTRAP_KEYS` / detail endpoints | planner API calls | "Planner API endpoints" |
 | `engine.HANDLED_*_TYPES` | snapshot contents | "Requirement types / Stat types the engine doesn't…" |
 | `gamedata.py` / `engine.py` field access | snapshot object keys | "Game data schema changed" |
 | `player.parse_save`, `SAVE_SLOTS` | the user's export | "Character export format", "Save has gear slots…" |

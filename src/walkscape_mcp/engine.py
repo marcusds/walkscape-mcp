@@ -49,7 +49,9 @@ HANDLED_STAT_TYPES = {
 # countsAsKeyword is handled via abilities in equipped_state; travel distance only matters for Travelling.
 # swapItem (Termite's "Terminate": chance to turn found logs into Carpentry XP) isn't modelled by the planner, its XP
 # formula (swapToXpEffortModifier) is undocumented, and its swapFromKeywords "logs" matches no item keyword ("log").
-IGNORED_STAT_TYPES = {"countsAsKeyword", "travelingDistance", "swapItem"}
+# fineMaterialOutcome ("Fine recipe outcome") only comes from Flambé's active effect, a chance for the 3 cooking
+# actions it completes instantly to give fine results; the planner ignores it and gear never grants it.
+IGNORED_STAT_TYPES = {"countsAsKeyword", "travelingDistance", "swapItem", "fineMaterialOutcome"}
 
 SLOT_ORDER = ["head", "cape", "back", "chest", "primary", "secondary", "hands", "legs", "neck", "feet",
               "ring0", "ring1", "tool0", "tool1", "tool2", "tool3", "tool4", "tool5"]

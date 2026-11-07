@@ -38,7 +38,7 @@ PLANNER = "https://gear.walkscape.app"
 # (name, regex anchor in the main planner bundle, chars before, chars after). Code we ported mirrors these.
 BUNDLE_ANCHORS = [
     ("level_work_efficiency", r"const \w+=\.005,\w+=\.0125,\w+=20;function \w+\(\{playerLevel", 50, 700),
-    ("quality_tier_stacking", r"\.includes\(\"consumable\"\)\)return", 120, 900),
+    ("quality_tier_stacking", r"findIndex\(\(\{quality:\w+\}\)=>\w+===\w+\)\?\?0;for", 350, 750),
     ("consumable_fine_attrs", r"fineAttributes\.map", 250, 150),
     ("special_table_attrs", r"!==\"rollSpecialTable\"\?", 250, 500),
     ("pet_level_attrs", r"if\(\"egg\"in \w+\)", 100, 400),
@@ -116,7 +116,7 @@ def fetch_planner() -> dict:
         index = c.get(PLANNER + "/").text
         bundle_path = re.search(r"/assets/index-[\w-]+\.js", index).group(0)
         bundle = c.get(PLANNER + bundle_path).text
-        worker_path = re.search(r"/assets/optimiser\.worker-[\w-]+\.js", bundle).group(0)
+        worker_path = re.search(r"/assets/(?:advancedO|o)ptimiser\.worker-[\w-]+\.js", bundle).group(0)
         worker = c.get(PLANNER + worker_path).text
     snippets = {}
     for name, pat, before, after in BUNDLE_ANCHORS:
@@ -166,7 +166,7 @@ def check_planner(rep: Report, cur: dict, accept: str | None):
     ref_ep = _read_ref(d / "endpoints.json") or []
     added, removed = sorted(set(cur["endpoints"]) - set(ref_ep)), sorted(set(ref_ep) - set(cur["endpoints"]))
     if added or removed:
-        rep.drift("Planner API endpoints changed -> consider sync.BULK_GETS",
+        rep.drift("Planner API endpoints changed -> consider sync.BULK_GETS / BOOTSTRAP_KEYS",
                   f"added: {added}\nremoved: {removed}")
     else:
         rep.ok("Planner API endpoints", f"{len(ref_ep)} endpoints")

@@ -37,6 +37,7 @@
   "findCollectibles",
   "findGems",
   "fineMaterialFind",
+  "fineMaterialOutcome",
   "inventorySpace",
   "noMaterialsConsumed",
   "qualityOutcome",
@@ -84,8 +85,11 @@
   "item": [
    "abilities",
    "buffs",
+   "canBeBanked",
+   "canBeDropped",
    "canBeFine",
    "canBeSold",
+   "canBeTraded",
    "consumableType",
    "desc",
    "gearType",
@@ -98,7 +102,6 @@
    "name",
    "quality",
    "requirements",
-   "tables",
    "type"
   ],
   "activity": [
@@ -141,7 +144,10 @@
    "levels",
    "looks",
    "name",
+   "rareDesc",
+   "rareId",
    "rareLooks",
+   "rareName",
    "xpRequirements"
   ],
   "location": [
