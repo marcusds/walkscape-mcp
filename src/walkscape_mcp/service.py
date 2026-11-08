@@ -1256,6 +1256,11 @@ class Service:
         return self.gd.search(query, [kind] if kind else None, 15)
 
     def _resolve_any(self, name: str, kinds: list[str]) -> tuple[str, str]:
+        colls = {"item": self.gd.items, "activity": self.gd.activities, "location": self.gd.locations,
+                 "pet": self.gd.pets, "recipe": self.gd.recipes}
+        for k in kinds:  # an exact id or name of a later kind beats a fuzzy match of an earlier one
+            if name in colls[k] or norm(name) in colls[k]:
+                return k, name if name in colls[k] else norm(name)
         for k in kinds:
             try:
                 return k, self.gd.resolve(name, k)

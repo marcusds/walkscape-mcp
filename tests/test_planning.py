@@ -315,3 +315,10 @@ def test_input_and_gathering_grinds_walk_to_the_bank(svc, monkeypatch):
         assert inv["bank"] == "Kallaheim" and inv["bank_round_trip_base_steps"] == 600 and inv["trips"] > 1
         assert inv["extra_travel_steps"] == round((inv["trips"] - 1) * 600 * svc._travel_factor()) > 0
         assert r["total_steps"] == pytest.approx(r["steps_per_item"] * 2000 + inv["extra_travel_steps"], abs=101)  # rounded rate
+
+
+def test_exact_recipe_name_beats_a_fuzzy_activity_match(svc):
+    # "Craft a fishing spear" fuzzily matches the Predator fishing (Spear) activity
+    assert svc.activity_info("Craft a fishing spear")["kind"] == "recipe"
+    assert svc.activity_info("craft_a_fishing_spear")["outputs"] == {"Fishing spear": 1}
+    assert svc.activity_info("Predator fishing (Spear)")["kind"] == "activity"
