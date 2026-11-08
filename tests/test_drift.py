@@ -7,7 +7,8 @@ WORKER = (Path(__file__).parents[1] / "reference/planner/optimiser.worker.js").r
 
 
 def test_identifier_renames_are_not_drift():
-    renamed = re.sub(r"\b(W|N|y)\b", lambda m: {"W": "Q", "N": "Z", "y": "k"}[m.group(1)], WORKER)
+    # variables only: a rebuild keeps property names (.y) and strings
+    renamed = re.sub(r"(?<![\w$.\"'])(W|N|y)\b", lambda m: {"W": "Q", "N": "Z", "y": "k"}[m.group(1)], WORKER)
     assert renamed != WORKER
     assert normalize_js(renamed) == normalize_js(WORKER)
 
