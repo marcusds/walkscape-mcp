@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import gearset, sync, wikidata
+from . import gearset, skillplan, sync, wikidata
 from .engine import (
     GEAR_DEPENDENT_REQS,
     Context,
@@ -51,7 +51,7 @@ from .optimizer import (
     quick_score,
 )
 from .paths import loadout_cache_file, player_file, player_info_file, save_history_dir, snapshot_dir
-from .player import SAVE_SLOTS, SKILL_XP, OwnedItem, Player, parse_save, with_updates
+from .player import SAVE_SLOTS, SKILL_XP, OwnedItem, Player, parse_save, skill_level, with_updates
 from .quality import at_least, quality_odds
 from .wiki import Wiki
 
@@ -98,6 +98,7 @@ NO_INVENTORY_SLOT = {"other", "collectible", "container"}
 SINCE_SAVE_SECTIONS = ("gear", "skills", "items", "reputation", "points", "carried", "equipped")
 INPUT_CANDIDATES = 2  # input items (e.g. arrow types) costed when getting more; each runs plan_recipe
 SLOT_LABELS = {"ring0": "ring 1", "ring1": "ring 2", **{f"tool{i}": f"tool {i + 1}" for i in range(6)}}
+GATHER_BATCH = 100  # plan_skill_leveling costs a material by the steps to get this many, per item
 
 
 def stack_size(gd: GameData, iid: str) -> int | None:
@@ -2828,6 +2829,128 @@ class Service:
                                         **self._trips(limit, out["completions"])}
                     extra = out["inventory"]["extra_travel_steps"]
                 out["total_steps"] = out["steps"] + sup["steps"] + extra
+        return out
+
+    @disk_memo
+    def plan_skill_leveling(self, skill: str, level: int, near: str | None = None, pet: str | None = "auto",
+                            keep: list[str] | None = None, owned_only: bool = False) -> dict:
+        outer = self._supply_cache is None  # one supply cache for every material costed in this plan
+        if outer:
+            self._supply_cache, self._supplying = {}, set()
+        try:
+            return self._plan_skill_leveling(skill, level, near, pet, keep, owned_only)
+        finally:
+            if outer:
+                self._supply_cache = None
+
+    def _plan_skill_leveling(self, skill: str, level: int, near: str | None, pet: str | None,
+                             keep: list[str] | None, owned_only: bool) -> dict:
+        gd, p = self.gd, self.player()
+        sk = norm(skill)
+        if sk not in gd.skills:
+            raise KeyError(f"No skill {skill!r}")
+        if not 2 <= level <= len(SKILL_XP):
+            raise ValueError(f"Level must be 2-{len(SKILL_XP)}")
+        xp_now, xp_target = p.skill_xp.get(sk, 0), SKILL_XP[level - 1]
+        out = {"skill": sk, "current_level": p.skill_levels.get(sk, 1), "target_level": level,
+               "xp_needed": max(0, xp_target - xp_now)}
+        if xp_now >= xp_target:
+            return {**out, "plan": [], "note": "Already at or past that level."}
+        keep_ids = {self._resolve_any(k, ["item"])[1] for k in keep or []}
+        src = self._near(near)
+        near_name = gd.locations[src]["name"] if src else None
+
+        cands, chosen, skipped = [], {}, []
+        for rid in self._matching_activities(sk, None, None, "recipe"):
+            r = gd.recipes[rid]
+            probe = self._context(rid, None)
+            if probe.required_level >= level:
+                continue  # unlocks at or after the target: never used
+            if self._visibility(probe)[0] == "hidden":
+                skipped.append({"recipe": r["name"], "why": "hidden until unlocked in-game"})
+                continue
+            probe.skill_levels = {**probe.skill_levels, sk: 99}  # the skill's own level is the plan's business
+            unmet = [self._req_text(q) for q in r.get("requirements") or []
+                     if q["type"] not in GEAR_DEPENDENT_REQS and q["type"] != "service"
+                     and not check_requirement(q, probe, None)]
+            if unmet:
+                skipped.append({"recipe": r["name"], "why": "; ".join(unmet)})
+                continue
+            ctx, lo, ev = self._best_loadout(rid, Objective("xp", sk), pet=pet, near=near)
+            m = ev.metrics
+            xps, spa = m["xp_per_step"].get(sk, 0), m["steps_per_action"]
+            if xps <= 0 or not math.isfinite(spa):
+                skipped.append({"recipe": r["name"], "why": f"gives no {sk} XP with your gear"})
+                continue
+            keep_mat = 1 - m["no_materials_consumed"]
+            groups = [[(o["item"], o["amount"] * keep_mat) for o in g["options"]] for g in r.get("materials") or []]
+            made = next(iter((r.get("itemRewards") or {}).items()), None)
+            cands.append(skillplan.Candidate(rid, r["name"], probe.required_level, xps * spa, spa, groups,
+                                             (made[0], made[1] * (1 + m["double_rewards"])) if made else None))
+            chosen[rid] = (ctx, lo)
+        if not cands:
+            raise ValueError(f"No {sk} recipes below level {level} the character can do; for a gathering "
+                             "skill use steps_to_level.")
+
+        stock = {i: sum(n) for i, n in p.item_counts.items() if i not in keep_ids}
+        how: dict[str, tuple[float, str] | None] = {}
+
+        def cost(iid: str) -> float | None:
+            if owned_only or iid in keep_ids:
+                return None
+            if iid not in how:
+                s = self._supply_steps(iid, GATHER_BATCH, near_name, pet)
+                how[iid] = (s["steps"] / GATHER_BATCH, s["how"]) if s else None
+            return how[iid][0] if how[iid] else None
+
+        res = skillplan.plan(cands, xp_now, xp_target, skill_level, lambda lv: SKILL_XP[lv - 1], stock, cost)
+
+        rows, gather_total = [], {}
+        for s in res.segments:
+            c = s.candidate
+            ctx, lo = chosen[c.id]
+            row = {"recipe": c.name, "crafts": s.crafts,
+                   "levels": f"{skill_level(s.xp_from)} -> {skill_level(s.xp_to)}",
+                   "xp": round(s.xp_to - s.xp_from), "xp_per_step": round(c.xp_per_craft / c.steps_per_craft, 4),
+                   "crafting_steps": round(s.crafting_steps)}
+            if s.used:
+                row["uses_owned"] = {gd.name(i): math.ceil(n) for i, n in s.used.items()}
+            if s.gathered:
+                row["get_first"] = [{"item": gd.name(i), "amount": math.ceil(n), "how": how[i][1],
+                                     "steps": round(n * how[i][0])} for i, n in s.gathered.items()]
+                for i, n in s.gathered.items():
+                    gather_total[i] = gather_total.get(i, 0) + n
+            row["steps"] = round(s.steps)
+            if ctx.service:
+                row["craft_at"] = f"{ctx.service['name']}, {gd.locations[ctx.location_id]['name']}"
+            row["planner_link"] = gearset.encode_link(gd, lo, c.id)
+            rows.append(row)
+
+        crafting = sum(s.crafting_steps for s in res.segments)
+        out.update({
+            "plan": rows,
+            "total_steps": round(res.steps), "crafting_steps": round(crafting),
+            "gathering_steps": round(res.steps - crafting),
+            "reaches_level": skill_level(res.xp_reached),
+            **({"stops_short": res.stuck} if res.stuck else {}),
+            **({"materials_to_get": {gd.name(i): {"amount": math.ceil(n), "how": how[i][1]}
+                                     for i, n in sorted(gather_total.items(), key=lambda t: -t[1] * how[t[0]][0])}}
+               if gather_total else {}),
+            **({"kept": sorted(gd.name(i) for i in keep_ids)} if keep_ids else {}),
+            "not_used": skipped[:15],
+            "notes": [
+                "Greedy by level band: until the next recipe unlocks, it crafts whatever costs the fewest steps per "
+                "XP, counting gathering for materials the character doesn't own. Owned materials cost nothing, so "
+                "they're used up first where that's cheaper; pass keep for anything you want to save.",
+                "What a craft makes goes back into stock, so later rows can use it (e.g. bars smelted earlier).",
+                "XP per step uses today's level and best owned XP loadout per recipe; levels gained along the way "
+                "make later rows a little faster than shown.",
+                f"Gathering is costed per item from the best farm or craft for {GATHER_BATCH}, without travel or bank "
+                "trips; plan_recipe on a row gives the trips, and optimize_loadout the full gear.",
+                *(["owned_only: nothing is gathered, so the plan stops when owned materials run out."]
+                  if owned_only else []),
+            ],
+        })
         return out
 
     def inventory_fill(self, activity: str, free_slots: int, location: str | None = None,

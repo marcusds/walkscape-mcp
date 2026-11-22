@@ -25,7 +25,8 @@ Workflow:
    "keep my camel"/"level my pet" -> pet="camel" (or pet="current"). Items the user insists on -> require_items.
 4. For "where should I farm X" call rank_activities. For "how do I get to X" / travel gear, call plan_route;
    for "nearest sawmill/kitchen/...", find_services. Recipes needing a service are done at any location with it.
-   Crafting N of something -> plan_recipe; crafting gear of a quality (Perfect, Eternal...) -> craft_quality; "how long to level X" -> steps_to_level; "when is my inventory full"
+   Crafting N of something -> plan_recipe; crafting gear of a quality (Perfect, Eternal...) -> craft_quality; "how long to level X" -> steps_to_level; "best way to level cooking/smithing/... with what I have"
+   -> plan_skill_leveling; "when is my inventory full"
    -> inventory_fill. Several items at once -> targets on rank_activities / optimize_loadout (objective "items").
    Remember where the player is (remember_player_info location) so travel-aware tools start there.
    "How many steps/XP since...?" -> compare_saves (asks for a fresh export if needed).
@@ -392,6 +393,21 @@ def steps_to_level(skill: str, level: int, activity: str | None = None, location
     total_steps adds farming or crafting the ones the character is short of, and the walks to the nearest bank
     to restock when they and the drops fill the inventory (inventory: actions_per_trip, trips, bank)."""
     return s().steps_to_level(skill, level, activity, location, pet)
+
+
+@mcp.tool()
+def plan_skill_leveling(skill: str, level: int, near: str | None = None, pet: str | None = "auto",
+                        keep: list[str] | None = None, owned_only: bool = False) -> dict:
+    """Cheapest way to level a crafting skill (cooking, smithing, carpentry, tailoring, crafting, trinketry...) to
+    `level` with the character's materials, level and gear: which recipes to craft, how many, in what order.
+    Each recipe uses its best owned XP loadout. Between recipe unlocks it picks the fewest steps per XP, counting
+    crafting plus gathering whatever materials the character doesn't own (the cheaper of farming or crafting them);
+    owned materials are used first where that's cheaper, and what a craft makes can feed a later row.
+    keep: items not to use up (e.g. ["Gold bar"]). owned_only: never gather, just get as far as owned materials go.
+    Each row: recipe, crafts, levels, xp, xp_per_step, uses_owned, get_first (materials to farm or craft, how,
+    steps), steps, craft_at, planner_link. Also total/crafting/gathering steps, materials_to_get, recipes not used
+    and why. Slow the first time for a character (one loadout search per recipe); cached afterwards."""
+    return s().plan_skill_leveling(skill, level, near, pet, keep, owned_only)
 
 
 @mcp.tool()

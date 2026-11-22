@@ -46,6 +46,7 @@ ln -s "$PWD/.claude/skills/walkscape-update" ~/.claude/skills/walkscape-update
 | `plan_recipe` | Crafting N of something: crafts, steps, materials vs owned, and the cheaper of farming or crafting the shortfall |
 | `craft_quality` | Odds of each crafted quality and the best loadout/service for a target quality |
 | `steps_to_level` | XP and steps to reach a level with an activity |
+| `plan_skill_leveling` | Cheapest way to level a crafting skill with your materials, level and gear: which recipes, how many, in what order, and what to gather |
 | `inventory_fill` | Steps until an activity's drops fill N inventory slots |
 | `list_activities` | Activities and recipes by skill, activity keyword or what a recipe makes, with the level needed and whether you can do them |
 | `compare_activities` | Rank several activities by an objective, each with its best loadout: e.g. the fastest tree for a 5,000-actions achievement |
